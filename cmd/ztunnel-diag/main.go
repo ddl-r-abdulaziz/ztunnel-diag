@@ -1,0 +1,344 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"sync"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/clientcmd"
+
+	"ztunnel-diag/internal/report"
+	"ztunnel-diag/internal/ztlog"
+)
+
+func main() {
+	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "path to kubeconfig (defaults to $KUBECONFIG, then in-cluster config)")
+	namespace := flag.String("namespace", "ztunnel-diag", "namespace to burst pods into (created if missing)")
+	count := flag.Int("count", 100, "number of pods to create simultaneously (stay under the target node's pod capacity minus already-running system pods, e.g. minikube's default kubelet max-pods=110, or excess pods sit permanently Pending and pollute the report as if they were slow to patch)")
+	targetNode := flag.String("target-node", "ztunnel-diag-m02", "node the burst pods are pinned to (by hostname) — the node being saturated")
+	window := flag.Duration("window", 60*time.Second, "how long to wait for each pod's status.podIP to appear before giving up on it")
+	settle := flag.Duration("settle", 30*time.Second, "extra time to wait after the observation window before scraping ztunnel's logs — in a large burst, later pods may still be scheduling or mid-connection (with ztunnel's own 5s hold still in flight) when the window closes")
+	target := flag.String("target", "", "host:port every burst pod makes a real HTTP request against (default: echo-target.<namespace>.svc.cluster.local:8080 — see hack/deploy-echo-target.sh, pinned to the *other* node so it stays warm)")
+	ztunnelNamespace := flag.String("ztunnel-namespace", "istio-system", "namespace ztunnel daemonset pods run in")
+	ztunnelLabel := flag.String("ztunnel-label", "app=ztunnel", "label selector for ztunnel pods")
+	keep := flag.Bool("keep", false, "keep the burst pods around after the run instead of deleting them")
+	asJSON := flag.Bool("json", false, "print the raw report as JSON instead of a human summary")
+	flag.Parse()
+
+	if *target == "" {
+		*target = fmt.Sprintf("echo-target.%s.svc.cluster.local:8080", *namespace)
+	}
+
+	ctx := context.Background()
+
+	clientset, err := buildClientset(*kubeconfig)
+	if err != nil {
+		log.Fatalf("building kube client: %v", err)
+	}
+
+	runID := fmt.Sprintf("%d", time.Now().UnixNano())
+	if err := ensureNamespace(ctx, clientset, *namespace); err != nil {
+		log.Fatalf("ensuring namespace %s: %v", *namespace, err)
+	}
+
+	ipWatch, err := startPodIPWatch(ctx, clientset, *namespace, runID)
+	if err != nil {
+		log.Fatalf("starting pod IP watch: %v", err)
+	}
+
+	createdAt, podNames := createBurst(ctx, clientset, *namespace, runID, *count, *targetNode, *target)
+	if !*keep {
+		defer deleteBurst(ctx, clientset, *namespace, podNames)
+	}
+
+	patchTimes := collectPodIPs(ctx, ipWatch, podNames, *window)
+
+	log.Printf("waiting %s for in-flight connections to settle before scraping ztunnel logs", *settle)
+	time.Sleep(*settle)
+
+	events := buildPodEvents(ctx, clientset, *namespace, *ztunnelNamespace, *ztunnelLabel, podNames, createdAt, patchTimes)
+	rep := report.Compute(events)
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(rep); err != nil {
+			log.Fatalf("encoding report: %v", err)
+		}
+		return
+	}
+	printSummary(rep)
+}
+
+func buildClientset(kubeconfig string) (*kubernetes.Clientset, error) {
+	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	if err != nil {
+		return nil, err
+	}
+	// client-go's default QPS/Burst (5/10) throttles a burst of concurrent
+	// pod+ServiceAccount creates client-side, which would leak into the
+	// patch-latency measurement as an artifact of this client rather than
+	// the cluster. Raised well above any burst size this tool is meant for.
+	cfg.QPS = 200
+	cfg.Burst = 400
+	return kubernetes.NewForConfig(cfg)
+}
+
+func ensureNamespace(ctx context.Context, cs *kubernetes.Clientset, ns string) error {
+	_, err := cs.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	if err == nil {
+		return nil
+	}
+	_, err = cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: ns},
+	}, metav1.CreateOptions{})
+	return err
+}
+
+// createBurst creates count pods concurrently so they hit the API server (and
+// the node's kubelet) as close to simultaneously as possible.
+func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string, count int, targetNode, target string) (map[string]time.Time, []string) {
+	names := make([]string, count)
+	createdAt := make([]time.Time, count)
+	var mu sync.Mutex
+	done := make(chan struct{}, count)
+
+	for i := 0; i < count; i++ {
+		name := fmt.Sprintf("ztunnel-diag-%s-%d", runID, i)
+		names[i] = name
+		go func(i int, name string) {
+			defer func() { done <- struct{}{} }()
+			sa := name // one ServiceAccount per pod, named after it
+			if _, err := cs.CoreV1().ServiceAccounts(ns).Create(ctx, &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{Name: sa, Labels: map[string]string{"app": "ztunnel-diag", "run": runID}},
+			}, metav1.CreateOptions{}); err != nil {
+				log.Printf("create serviceaccount %s: %v", sa, err)
+				return
+			}
+			pod := podSpec(name, runID, sa, targetNode, target)
+			t := time.Now()
+			if _, err := cs.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+				log.Printf("create pod %s: %v", name, err)
+				return
+			}
+			mu.Lock()
+			createdAt[i] = t
+			mu.Unlock()
+		}(i, name)
+	}
+	for i := 0; i < count; i++ {
+		<-done
+	}
+
+	byName := make(map[string]time.Time, count)
+	for i, name := range names {
+		if !createdAt[i].IsZero() {
+			byName[name] = createdAt[i]
+		}
+	}
+	return byName, names
+}
+
+// podSpec builds the burst workload pod, pinned to targetNode (by hostname)
+// so the whole burst saturates one specific node.
+func podSpec(name, runID, serviceAccount, targetNode, target string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{"app": "ztunnel-diag", "run": runID},
+		},
+		Spec: corev1.PodSpec{
+			ServiceAccountName: serviceAccount,
+			NodeSelector:       map[string]string{"kubernetes.io/hostname": targetNode},
+			RestartPolicy:      corev1.RestartPolicyNever,
+			Containers: []corev1.Container{{
+				Name:    "workload",
+				Image:   "busybox:1.36",
+				Command: []string{"sh", "-c", fmt.Sprintf("wget -T 10 -O /dev/null http://%s/ 2>&1; sleep 3600", target)},
+			}},
+		},
+	}
+}
+
+func startPodIPWatch(ctx context.Context, cs *kubernetes.Clientset, ns, runID string) (watch.Interface, error) {
+	return cs.CoreV1().Pods(ns).Watch(ctx, metav1.ListOptions{LabelSelector: "run=" + runID})
+}
+
+// collectPodIPs drains w for up to window, recording the first time each
+// pod's status.podIP appears.
+func collectPodIPs(ctx context.Context, w watch.Interface, podNames []string, window time.Duration) map[string]time.Time {
+	patchTimes := make(map[string]time.Time, len(podNames))
+	pending := make(map[string]bool, len(podNames))
+	for _, n := range podNames {
+		pending[n] = true
+	}
+
+	watchCtx, cancel := context.WithTimeout(ctx, window)
+	defer cancel()
+	defer w.Stop()
+
+	for len(pending) > 0 {
+		select {
+		case <-watchCtx.Done():
+			return patchTimes
+		case event, ok := <-w.ResultChan():
+			if !ok {
+				log.Printf("pod IP watch closed early: %d/%d pods still unresolved", len(pending), len(pending)+len(patchTimes))
+				return patchTimes
+			}
+			if event.Type == watch.Error {
+				log.Printf("pod IP watch error event: %#v", event.Object)
+				continue
+			}
+			pod, ok := event.Object.(*corev1.Pod)
+			if !ok || event.Type == watch.Deleted {
+				continue
+			}
+			if pod.Status.PodIP == "" {
+				continue
+			}
+			if _, seen := patchTimes[pod.Name]; seen {
+				continue
+			}
+			patchTimes[pod.Name] = time.Now()
+			delete(pending, pod.Name)
+		}
+	}
+	return patchTimes
+}
+
+// buildPodEvents turns raw timestamps into report.PodEvents. Note IPAssignedAt
+// here is the client-observed pod-creation time, not a node-local sandbox
+// timestamp — see README.md "What this measures" for why that's the honest
+// proxy available without shelling into the node.
+func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS, ztunnelLabel string, podNames []string, createdAt, patchTimes map[string]time.Time) []report.PodEvent {
+	ztunnelLogs := fetchZtunnelLogs(ctx, cs, ztunnelNS, ztunnelLabel)
+
+	events := make([]report.PodEvent, 0, len(podNames))
+	for _, name := range podNames {
+		created, gotCreate := createdAt[name]
+		if !gotCreate {
+			continue // create call itself failed; nothing meaningful to report
+		}
+		patchedAt, gotPatch := patchTimes[name]
+		if !gotPatch {
+			// Never observed an IP within the window: treat as maximally
+			// delayed rather than silently dropping it from the report.
+			patchedAt = time.Now()
+		}
+		timedOut := false
+		for _, line := range ztunnelLogs {
+			if ztlog.MatchesTimeoutForPod(line, name) {
+				timedOut = true
+				break
+			}
+		}
+		routingDelay, routingDelayKnown := ztlog.RoutingDelay(ztunnelLogs, name, ns)
+		events = append(events, report.PodEvent{
+			Name:              name,
+			IPAssignedAt:      created,
+			IPPatchedAtAPI:    patchedAt,
+			ZtunnelTimeout:    timedOut,
+			RoutingDelay:      routingDelay,
+			RoutingDelayKnown: routingDelayKnown,
+		})
+	}
+	return events
+}
+
+func fetchZtunnelLogs(ctx context.Context, cs *kubernetes.Clientset, ns, label string) []string {
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: label})
+	if err != nil {
+		log.Printf("list ztunnel pods: %v", err)
+		return nil
+	}
+	var lines []string
+	for _, p := range pods.Items {
+		req := cs.CoreV1().Pods(ns).GetLogs(p.Name, &corev1.PodLogOptions{SinceSeconds: int64Ptr(300)})
+		stream, err := req.Stream(ctx)
+		if err != nil {
+			log.Printf("stream logs for %s: %v", p.Name, err)
+			continue
+		}
+		buf := make([]byte, 0, 1<<20)
+		chunk := make([]byte, 32*1024)
+		for {
+			n, err := stream.Read(chunk)
+			if n > 0 {
+				buf = append(buf, chunk[:n]...)
+			}
+			if err != nil {
+				break
+			}
+		}
+		stream.Close()
+		lines = append(lines, splitLines(string(buf))...)
+	}
+	return lines
+}
+
+func splitLines(s string) []string {
+	var lines []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, s[start:i])
+			start = i + 1
+		}
+	}
+	if start < len(s) {
+		lines = append(lines, s[start:])
+	}
+	return lines
+}
+
+func int64Ptr(v int64) *int64 { return &v }
+
+func deleteBurst(ctx context.Context, cs *kubernetes.Clientset, ns string, podNames []string) {
+	grace := int64(0)
+	for _, name := range podNames {
+		if err := cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: &grace}); err != nil {
+			log.Printf("delete pod %s: %v", name, err)
+		}
+		// one ServiceAccount was created per pod, named after it — see createBurst.
+		if err := cs.CoreV1().ServiceAccounts(ns).Delete(ctx, name, metav1.DeleteOptions{}); err != nil {
+			log.Printf("delete serviceaccount %s: %v", name, err)
+		}
+	}
+}
+
+func printSummary(rep report.Report) {
+	fmt.Println("ztunnel-diag report")
+	fmt.Printf("  pods observed:        %d\n", rep.Count)
+	fmt.Printf("  ztunnel timeouts:     %d\n", rep.TimeoutCount)
+	fmt.Printf("  mean patch latency:   %s\n", rep.MeanPatchLatency)
+	fmt.Printf("  p95 patch latency:    %s\n", rep.P95PatchLatency)
+	fmt.Printf("  max patch latency:    %s\n", rep.MaxPatchLatency)
+	if rep.RoutingDelayCount > 0 {
+		fmt.Printf("  routing delay (ztunnel's actual wait-for-workload-to-connection-opened time, %d/%d pods, requires RUST_LOG=debug):\n", rep.RoutingDelayCount, rep.Count)
+		fmt.Printf("    mean: %s   max: %s\n", rep.MeanRoutingDelay, rep.MaxRoutingDelay)
+	} else {
+		fmt.Printf("  routing delay:        unknown for all pods (set RUST_LOG=debug on ztunnel to capture it)\n")
+	}
+	fmt.Println()
+	for _, p := range rep.Pods {
+		flag := ""
+		if p.ZtunnelTimeout {
+			flag = "  <-- ztunnel timeout"
+		}
+		routing := "routing delay unknown"
+		if p.RoutingDelayKnown {
+			routing = fmt.Sprintf("routing delay %s", p.RoutingDelay)
+		}
+		fmt.Printf("  %-40s patch=%-10s %s%s\n", p.Name, p.PatchLatency, routing, flag)
+	}
+}
