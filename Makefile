@@ -3,6 +3,10 @@
 KUBECONFIG ?= $(HOME)/.kube/config
 export KUBECONFIG
 
+# CREATE=false reuses an existing cluster instead of tearing it down and
+# rebuilding it (e.g. `make run CREATE=false`).
+CREATE ?= true
+
 .PHONY: help test build serve cluster echo-target run
 
 help: ## Show this help
@@ -12,8 +16,12 @@ help: ## Show this help
 test: ## Run all unit tests
 	go test ./...
 
-cluster: ## Start (or reuse) the ztunnel-diag minikube ambient cluster
-	hack/setup-minikube-ambient.sh
+cluster: ## Start (or reuse) the ztunnel-diag minikube ambient cluster. Pass CREATE=false to reuse an existing cluster instead of recreating it.
+	@if [ "$(CREATE)" = "false" ]; then \
+		hack/setup-minikube-ambient.sh -K; \
+	else \
+		hack/setup-minikube-ambient.sh; \
+	fi
 
 echo-target: cluster ## Deploy the echo-target burst destination
 	hack/deploy-echo-target.sh
