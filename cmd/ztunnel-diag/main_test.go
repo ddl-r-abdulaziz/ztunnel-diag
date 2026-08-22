@@ -1,9 +1,44 @@
 package main
 
 import (
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestStartHostLoadGoroutinesExitAfterStop(t *testing.T) {
+	// startHostLoad's whole point is to keep the host's real CPU busy for as
+	// long as the caller wants and no longer — a stop() that doesn't actually
+	// stop the goroutines would silently burn the host's CPU (and battery)
+	// indefinitely after the test run finishes.
+	before := runtime.NumGoroutine()
+
+	stop := startHostLoad(4)
+	time.Sleep(20 * time.Millisecond)
+	during := runtime.NumGoroutine()
+	if during < before+4 {
+		t.Fatalf("during load: NumGoroutine = %d, want at least %d (before=%d)", during, before+4, before)
+	}
+
+	stop()
+	time.Sleep(50 * time.Millisecond)
+	after := runtime.NumGoroutine()
+	if after > before+1 { // small slack for scheduling noise
+		t.Fatalf("after stop: NumGoroutine = %d, want close to pre-load baseline %d", after, before)
+	}
+}
+
+func TestStartHostLoadZeroWorkersIsANoop(t *testing.T) {
+	before := runtime.NumGoroutine()
+
+	stop := startHostLoad(0)
+	time.Sleep(10 * time.Millisecond)
+	if got := runtime.NumGoroutine(); got > before+1 {
+		t.Fatalf("NumGoroutine = %d, want no new goroutines for 0 workers", got)
+	}
+	stop() // must not panic
+}
 
 func TestPodSpecWorkloadContainerMakesARealConnection(t *testing.T) {
 	// ztunnel only attempts its on-demand identity lookup on a workload's

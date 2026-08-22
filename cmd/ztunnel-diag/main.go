@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,6 +34,7 @@ func main() {
 	ztunnelLabel := flag.String("ztunnel-label", "app=ztunnel", "label selector for ztunnel pods")
 	keep := flag.Bool("keep", false, "keep the burst pods around after the run instead of deleting them")
 	asJSON := flag.Bool("json", false, "print the raw report as JSON instead of a human summary")
+	hostLoadWorkers := flag.Int("host-load-workers", runtime.NumCPU(), "goroutines busy-looping on the host's real CPU for the duration of the burst+window+settle, to compete with minikube's Docker containers (istiod/ztunnel) for actual host scheduling time — an in-cluster CPU-hog pod only competes within the cluster's own CPU accounting and didn't move the needle. 0 disables this")
 	flag.Parse()
 
 	if *target == "" {
@@ -55,6 +58,8 @@ func main() {
 		log.Fatalf("starting pod IP watch: %v", err)
 	}
 
+	stopHostLoad := startHostLoad(*hostLoadWorkers)
+
 	createdAt, podNames := createBurst(ctx, clientset, *namespace, runID, *count, *targetNode, *target)
 	if !*keep {
 		defer deleteBurst(ctx, clientset, *namespace, podNames)
@@ -64,6 +69,8 @@ func main() {
 
 	log.Printf("waiting %s for in-flight connections to settle before scraping ztunnel logs", *settle)
 	time.Sleep(*settle)
+
+	stopHostLoad()
 
 	events := buildPodEvents(ctx, clientset, *namespace, *ztunnelNamespace, *ztunnelLabel, podNames, createdAt, patchTimes)
 	rep := report.Compute(events)
@@ -77,6 +84,24 @@ func main() {
 		return
 	}
 	printSummary(rep)
+}
+
+// startHostLoad spins n goroutines doing pure CPU-bound busy work until the
+// returned stop func is called. minikube's nodes are just Docker containers
+// sharing the host machine's real CPU, so keeping host cores busy competes
+// with istiod/ztunnel's own container processes for actual OS scheduling
+// time — a more direct lever on the race than an in-cluster CPU-hog pod,
+// which only competes within the cluster's own view of CPU and didn't move
+// the needle (see README).
+func startHostLoad(n int) (stop func()) {
+	var stopped atomic.Bool
+	for i := 0; i < n; i++ {
+		go func() {
+			for !stopped.Load() {
+			}
+		}()
+	}
+	return func() { stopped.Store(true) }
 }
 
 func buildClientset(kubeconfig string) (*kubernetes.Clientset, error) {

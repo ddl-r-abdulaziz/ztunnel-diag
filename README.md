@@ -8,7 +8,10 @@ once), kubelet can take several seconds to patch a pod's IP onto its
 API-server `status.podIP`. ztunnel acks a workload's first real connection
 immediately and holds it open for a hardcoded 5s waiting for routing/identity
 info to arrive before forwarding or dropping it — if that hasn't landed by
-then, the connection dies with `timed out waiting for workload`.
+then, the connection dies with `timed out waiting for workload`. The 5s
+itself is an unconditional `Duration::from_secs(5)` literal at the call site,
+not a named constant or config knob — confirmed unchanged from 1.26.0 through
+1.30.3: https://github.com/istio/ztunnel/blob/1.30.3/src/proxy.rs#L246
 
 **The one test:** 100 workload pods, each with its own ServiceAccount (istio
 identity is per-namespace-and-ServiceAccount, not per-pod, so this matters —
@@ -61,18 +64,31 @@ make echo-target
 ```
 
 (`make cluster` runs `hack/setup-minikube-ambient.sh`, `make echo-target` runs
-`hack/deploy-echo-target.sh`.)
+`hack/deploy-echo-target.sh`.) `make destroy-cluster` tears the profile down
+entirely when you're done.
 
-The first starts (or reuses) a 2-node minikube profile named `ztunnel-diag`,
-installs upstream istio's ambient profile via `istioctl`, sets
-`RUST_LOG=debug` on ztunnel (needed for routing delay), and labels a
-`ztunnel-diag` namespace for the ambient dataplane. Requires `istioctl` on
-PATH. Pass `-K` to skip deleting a pre-existing cluster with the same profile
-name.
+The first starts (or reuses) a 2-node minikube profile named `ztunnel-diag`
+(`--cpus=2` per node — deliberately tight), installs upstream istio's ambient
+profile via `istioctl`, sets `RUST_LOG=debug` on ztunnel (needed for routing
+delay), and labels a `ztunnel-diag` namespace for the ambient dataplane.
+Requires `istioctl` on PATH. Pass `-K` to skip deleting a pre-existing
+cluster with the same profile name (or `make cluster CREATE=false`).
 
 The second deploys the burst's target: a small `busybox httpd` pinned to the
 control-plane node (`ztunnel-diag`), fronted by a ClusterIP `Service` at
 `echo-target.ztunnel-diag.svc.cluster.local:8080`.
+
+Making the race actually cross the 5s budget needs istiod/ztunnel's own
+processing to fall behind — elevated patch latency alone doesn't reliably do
+it (istiod can push a workload's identity from data already available at pod
+creation, independent of `status.podIP` — see "What we explored and ruled
+out"). An in-cluster CPU-hog pod pinned to istiod's node was tried first and
+didn't move the needle: it only competes within the cluster's own CPU
+accounting. `cmd/ztunnel-diag` instead busy-loops goroutines directly on the
+*host* machine for the duration of the burst (`--host-load-workers`, default
+`runtime.NumCPU()`) — minikube's nodes are just Docker containers sharing
+the host's real CPU, so this competes with istiod/ztunnel at the actual OS
+scheduling level.
 
 ## Running the test
 
@@ -82,8 +98,7 @@ make run
 
 runs `make cluster` and `make echo-target` (both safe to re-run — they reuse
 the existing cluster/deployment if already up) before invoking the test.
-Once the cluster and echo-target are up, you can also invoke the test
-directly:
+Once those are up, you can also invoke the test directly:
 
 ```
 go run ./cmd/ztunnel-diag
@@ -105,6 +120,7 @@ turned out not to matter.
 | `--settle` | 30s | extra time after the window before scraping ztunnel's logs, so in-flight connections resolve first |
 | `--json` | false | print the raw report as JSON |
 | `--keep` | false | leave the burst pods running afterward instead of deleting them |
+| `--host-load-workers` | `runtime.NumCPU()` | goroutines busy-looping on the host's real CPU during the burst+window+settle, to compete with minikube's Docker containers for actual scheduling time (0 disables) |
 
 Expected result, per the last confirmed run (95 pods, since bumped to the
 100 default): every pod but one stayed under the 5s routing-delay budget;

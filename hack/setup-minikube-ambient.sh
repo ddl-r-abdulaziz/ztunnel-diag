@@ -45,7 +45,11 @@ if ! minikube status --profile "$profile_name" >/dev/null 2>&1; then
   # Docker network than the control-plane node ("subnet is taken" during
   # add), leaving it with no route to the API server at all. Provisioning
   # both nodes together avoids that.
-  minikube start --profile "$profile_name" --nodes=2 --cpus=4 --memory=8g
+  # --cpus=2 deliberately starves istiod/ztunnel more than 4 would — they're
+  # Docker containers sharing the host's real CPU, and less headroom for
+  # their own processing under a burst makes the ztunnel timeout more likely
+  # to actually cross the 5s budget rather than staying just under it.
+  minikube start --profile "$profile_name" --nodes=2 --cpus=2 --memory=8g
 else
   print_info "Reusing existing minikube profile '$profile_name'"
 fi

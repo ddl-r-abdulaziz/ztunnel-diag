@@ -7,7 +7,7 @@ export KUBECONFIG
 # rebuilding it (e.g. `make run CREATE=false`).
 CREATE ?= true
 
-.PHONY: help test build serve cluster echo-target run
+.PHONY: help test build serve cluster destroy-cluster echo-target run
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -22,6 +22,9 @@ cluster: ## Start (or reuse) the ztunnel-diag minikube ambient cluster. Pass CRE
 	else \
 		hack/setup-minikube-ambient.sh; \
 	fi
+
+destroy-cluster: ## Tear down the ztunnel-diag minikube profile entirely
+	minikube delete --profile ztunnel-diag
 
 echo-target: cluster ## Deploy the echo-target burst destination
 	hack/deploy-echo-target.sh
