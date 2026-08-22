@@ -67,12 +67,21 @@ make echo-target
 `hack/deploy-echo-target.sh`.) `make destroy-cluster` tears the profile down
 entirely when you're done.
 
+Every target that touches minikube/kubectl/istioctl depends on `make deps`
+first, which downloads pinned versions (`hack/install-deps.sh`: minikube
+v1.38.1, kubectl v1.33.13, istioctl 1.30.3) into `.bin/`, and the Makefile
+puts `.bin/` ahead of the rest of `PATH` for every recipe. Without this, all
+three resolve to whatever happens to be on the developer's own PATH — which
+is exactly how this repo ended up silently installing an EOL istio 1.26.0 for
+a while, from a stale system istioctl. `deps` is idempotent; it only
+downloads a tool if the pinned version isn't already sitting in `.bin/`.
+
 The first starts (or reuses) a 2-node minikube profile named `ztunnel-diag`
-(`--cpus=2` per node — deliberately tight), installs upstream istio's ambient
-profile via `istioctl`, sets `RUST_LOG=debug` on ztunnel (needed for routing
-delay), and labels a `ztunnel-diag` namespace for the ambient dataplane.
-Requires `istioctl` on PATH. Pass `-K` to skip deleting a pre-existing
-cluster with the same profile name (or `make cluster CREATE=false`).
+(`--cpus=2` per node — deliberately tight), installs the pinned istio ambient
+profile, sets `RUST_LOG=debug` on ztunnel (needed for routing delay), and
+labels a `ztunnel-diag` namespace for the ambient dataplane. Pass `-K` to
+skip deleting a pre-existing cluster with the same profile name (or
+`make cluster CREATE=false`).
 
 The second deploys the burst's target: a small `busybox httpd` pinned to the
 control-plane node (`ztunnel-diag`), fronted by a ClusterIP `Service` at
