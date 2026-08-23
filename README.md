@@ -13,14 +13,19 @@ itself is an unconditional `Duration::from_secs(5)` literal at the call site,
 not a named constant or config knob — confirmed unchanged from 1.26.0 through
 1.30.3: https://github.com/istio/ztunnel/blob/1.30.3/src/proxy.rs#L246
 
-**The one test:** 100 workload pods, each with its own ServiceAccount (istio
-identity is per-namespace-and-ServiceAccount, not per-pod, so this matters —
-see below), all pinned to one node — saturating its ~110 pod capacity — each
-making a real HTTP request against a dedicated service pinned to the *other*
-node, so the target itself stays warm and unaffected by the saturation. Run
-it enough times at this scale and a real `timed out waiting for workload`
-shows up, with the offending pod's measured routing delay landing right at
-or past the 5s budget while every other pod stays under it.
+The test in this repository:
+* 2 node cluster using minikube
+   * One is warm, and hosts a service to try to connect to
+   * The other is cordoned so that we get something close to a scale event  
+* 100 workload pods, each with its own ServiceAccount all pinned to one node
+  * cordon released, daemonset and pods arrive and spam the kubelet on the node
+* Simultaneous load generating workers created by the test harness (host shares cpu
+  with minikube)
+
+Outcome: produces the measurable >5s delay causing ztunnel to drop some connections
+
+This is the simplest repro of an issue we so most commonly with Karpenter's aggressive
+node management.
 
 ## What this measures
 
@@ -34,17 +39,7 @@ or past the 5s budget while every other pod stays under it.
   (ztunnel identifies the workload by name in this message, not by IP).
 - **routing delay** (requires `RUST_LOG=debug` on ztunnel — set by
   `hack/setup-minikube-ambient.sh`): how long ztunnel itself took, from first
-  needing this workload's identity to actually opening its connection. This
-  is the number that actually matters against the 5s budget — **not** the
-  access log's `connection complete ... duration=` field, which is the whole
-  connection's lifetime (dominated by however long the client holds the
-  socket open) and is easy to mistake for ztunnel's internal wait. One
-  nuance: the probe connects to a hostname (the target service's DNS name),
-  so ztunnel's DNS proxy resolves it first — that DNS query is itself an
-  identity-consuming event and is usually what "first needs the identity," a
-  moment before the TCP connect that follows. Same underlying identity-gate
-  subsystem either way, but the measured delay reflects "first touched the
-  gate for any reason," not specifically "time to open the TCP connection."
+  needing this workload's identity to actually opening its connection.
 
 This is an honest proxy, not an exact replay of the original investigation.
 The original istio issue measured the gap between the *node-local* sandbox IP
@@ -56,49 +51,6 @@ node-local one too, correlate this tool's output with
 `minikube ssh -- sudo journalctl -u kubelet` on the relevant node, the way
 the original issue did.
 
-## Setup
-
-```
-make cluster
-make echo-target
-```
-
-(`make cluster` runs `hack/setup-minikube-ambient.sh`, `make echo-target` runs
-`hack/deploy-echo-target.sh`.) `make destroy-cluster` tears the profile down
-entirely when you're done.
-
-Every target that touches minikube/kubectl/istioctl depends on `make deps`
-first, which downloads pinned versions (`hack/install-deps.sh`: minikube
-v1.38.1, kubectl v1.33.13, istioctl 1.30.3) into `.bin/`, and the Makefile
-puts `.bin/` ahead of the rest of `PATH` for every recipe. Without this, all
-three resolve to whatever happens to be on the developer's own PATH — which
-is exactly how this repo ended up silently installing an EOL istio 1.26.0 for
-a while, from a stale system istioctl. `deps` is idempotent; it only
-downloads a tool if the pinned version isn't already sitting in `.bin/`.
-
-The first starts (or reuses) a 2-node minikube profile named `ztunnel-diag`
-(`--cpus=2` per node — deliberately tight), installs the pinned istio ambient
-profile, sets `RUST_LOG=debug` on ztunnel (needed for routing delay), and
-labels a `ztunnel-diag` namespace for the ambient dataplane. Pass `-K` to
-skip deleting a pre-existing cluster with the same profile name (or
-`make cluster CREATE=false`).
-
-The second deploys the burst's target: a small `busybox httpd` pinned to the
-control-plane node (`ztunnel-diag`), fronted by a ClusterIP `Service` at
-`echo-target.ztunnel-diag.svc.cluster.local:8080`.
-
-Making the race actually cross the 5s budget needs istiod/ztunnel's own
-processing to fall behind — elevated patch latency alone doesn't reliably do
-it (istiod can push a workload's identity from data already available at pod
-creation, independent of `status.podIP` — see "What we explored and ruled
-out"). An in-cluster CPU-hog pod pinned to istiod's node was tried first and
-didn't move the needle: it only competes within the cluster's own CPU
-accounting. `cmd/ztunnel-diag` instead busy-loops goroutines directly on the
-*host* machine for the duration of the burst (`--host-load-workers`, default
-`runtime.NumCPU()`) — minikube's nodes are just Docker containers sharing
-the host's real CPU, so this competes with istiod/ztunnel at the actual OS
-scheduling level.
-
 ## Running the test
 
 ```
@@ -107,18 +59,12 @@ make run
 
 runs `make cluster` and `make echo-target` (both safe to re-run — they reuse
 the existing cluster/deployment if already up) before invoking the test.
-Once those are up, you can also invoke the test directly:
-
-```
-go run ./cmd/ztunnel-diag
-```
 
 Defaults are the test as described above: 100 pods, pinned to
 `--target-node ztunnel-diag-m02`, each hitting `--target
-echo-target.ztunnel-diag.svc.cluster.local:8080`. Flags exist to adjust
-these, but the point of this repo is this one test, not a knob-exploration
-harness — see "What we explored and ruled out" below for the paths that
-turned out not to matter.
+echo-target.ztunnel-diag.svc.cluster.local:8080`.
+
+Flags exist for tweaking but are not needed to repro:
 
 | flag | default | purpose |
 |---|---|---|
@@ -131,11 +77,6 @@ turned out not to matter.
 | `--keep` | false | leave the burst pods running afterward instead of deleting them |
 | `--host-load-workers` | `runtime.NumCPU()` | goroutines busy-looping on the host's real CPU during the burst+window+settle, to compete with minikube's Docker containers for actual scheduling time (0 disables) |
 
-Expected result, per the last confirmed run (95 pods, since bumped to the
-100 default): every pod but one stayed under the 5s routing-delay budget;
-the one pod that timed out had the single highest routing delay of the
-batch (5.789s), and the next-highest (4.891s) didn't time out — a clean
-line right at the 5s cutoff.
 
 ## What we explored and ruled out
 
@@ -194,16 +135,3 @@ worth keeping even though the code isn't:
   pod-capacity ceiling (110 in minikube) silently caps any burst larger than
   that, leaving the excess permanently Pending and polluting the report as
   if they were just slow to patch.
-
-## Development
-
-Pure logic (`internal/report`, `internal/ztlog`) is unit tested and has no
-cluster dependency:
-
-```
-go test ./...
-go vet ./...
-```
-
-`cmd/ztunnel-diag` itself is an integration harness against a real cluster
-and isn't covered by the unit tests above.
