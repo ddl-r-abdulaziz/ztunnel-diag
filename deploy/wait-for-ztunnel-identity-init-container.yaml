@@ -1,0 +1,55 @@
+# Mitigation for istio/istio#57674: on a saturated node, a burst of new pods
+# can outrun istiod's identity-push pipeline, so ztunnel holds a new pod's
+# first connection for its hardcoded 5s then drops it.
+#
+# This init container retries a real HTTPS request to the k8s API server
+# (via $KUBERNETES_SERVICE_HOST/_PORT, injected into every pod by kubelet on
+# every conformant Kubernetes distribution — GKE, EKS, AKS, Rancher,
+# OpenShift, k3s, kubeadm, etc. — no DNS, no dependency on any other
+# service) until it gets a genuine HTTP response back, proving ztunnel has
+# forwarded a connection all the way through rather than just accepted the
+# local TCP handshake. Only then does the workload container start. Fails
+# open (always exits 0) so a pod that never gets a response still starts
+# rather than hanging forever.
+#
+# Caveat: a default-deny NetworkPolicy that blocks egress to the API server
+# (common on hardened OpenShift/Rancher namespaces) silently defeats this —
+# the probe exhausts its retries and fails open, so the workload still
+# starts, but the mitigation stops doing anything. Confirm egress to the API
+# server is allowed from the namespace this runs in.
+#
+# Validated in https://github.com/ddl-r-abdulaziz/ztunnel-diag: resolved
+# 85/100 pods to a definitive per-pod causal verdict (33 provably
+# unnecessary, 52 provably necessary), and added no measurable load to the
+# API server (patch latency indistinguishable from a run with no mitigation
+# at all). A simpler "bare no-op init container" alternative was tested and
+# ruled out — see that repo's README — its apparent success was coincidental
+# overlap with this cluster's specific timing, not a real protective
+# mechanism, so it isn't included here.
+#
+# This is a fragment, not a standalone object: copy the entries under
+# initContainers into spec.initContainers of any Pod, Deployment,
+# StatefulSet, etc. that should wait out this race before starting.
+initContainers:
+  - name: wait-for-ztunnel-identity
+    image: busybox:1.36
+    command:
+      - sh
+      - -c
+      - |
+        start=$(date +%s)
+        i=0
+        outcome=exhausted
+        while [ $i -lt 20 ]; do
+          i=$((i+1))
+          if wget --no-check-certificate -T 3 -O /dev/null \
+              "https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT/" 2>&1 \
+              | grep -q "HTTP/"; then
+            outcome=ready
+            break
+          fi
+          sleep 1
+        done
+        end=$(date +%s)
+        echo "wait-for-ztunnel-identity: $outcome after $i attempt(s), $((end-start))s elapsed"
+        exit 0

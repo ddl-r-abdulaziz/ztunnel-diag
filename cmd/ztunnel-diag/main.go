@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -39,7 +40,7 @@ func main() {
 	keep := flag.Bool("keep", false, "keep the burst pods around after the run instead of deleting them")
 	asJSON := flag.Bool("json", false, "print the raw report as JSON instead of a human summary")
 	hostLoadWorkers := flag.Int("host-load-workers", runtime.NumCPU(), "goroutines busy-looping on the host's real CPU for the duration of the burst+window+settle, to compete with minikube's Docker containers (istiod/ztunnel) for actual host scheduling time — an in-cluster CPU-hog pod only competes within the cluster's own CPU accounting and didn't move the needle. 0 disables this")
-	initContainerMode := flag.String("init-container-mode", initContainerModeNone, "mitigation init container to add to each burst pod: none | noop (bare exit 0, no logic — isolates whether adding any init container's own start overhead matters) | probe (retries a real HTTPS request to the k8s API server, via its injected env vars not DNS, until it gets a genuine HTTP response back)")
+	initContainerMode := flag.String("init-container-mode", initContainerModeNone, "mitigation init container to add to each burst pod: none | noop (bare exit 0, no logic — isolates whether adding any init container's own start overhead matters) | probe (retries a real HTTPS request to the k8s API server, via its injected env vars not DNS, until it gets a genuine HTTP response back) | mixed (alternates noop/probe by pod index within this one burst, so both experience identical congestion — prints a correlation between noop's transition overhead and probe's measured identity-wait)")
 	flag.Parse()
 
 	if *target == "" {
@@ -81,7 +82,7 @@ func main() {
 
 	stopHostLoad := startHostLoad(*hostLoadWorkers)
 
-	createdAt, podNames := createBurst(ctx, clientset, *namespace, runID, *count, *targetNode, *target, *initContainerMode)
+	createdAt, podNames, podModes := createBurst(ctx, clientset, *namespace, runID, *count, *targetNode, *target, *initContainerMode)
 	if !*keep {
 		defer deleteBurst(ctx, clientset, *namespace, podNames)
 	}
@@ -93,8 +94,12 @@ func main() {
 
 	stopHostLoad()
 
-	events := buildPodEvents(ctx, clientset, *namespace, *ztunnelNamespace, *ztunnelLabel, targetHost, podNames, createdAt, patchTimes, *initContainerMode)
+	events := buildPodEvents(ctx, clientset, *namespace, *ztunnelNamespace, *ztunnelLabel, targetHost, podNames, createdAt, patchTimes, podModes)
 	rep := report.Compute(events)
+
+	if *initContainerMode == initContainerModeMixed {
+		printMixedModeCorrelation(rep.Pods)
+	}
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -139,12 +144,6 @@ func buildClientset(kubeconfigPath string) (*kubernetes.Clientset, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
-// buildRESTConfig resolves a kubeconfig the same way kubectl does: an
-// explicit kubeconfigPath wins, otherwise the KUBECONFIG env var, otherwise
-// ~/.kube/config. clientcmd.BuildConfigFromFlags does NOT do this fallback
-// chain on its own — passing it an empty path only tries in-cluster config,
-// so without KUBECONFIG explicitly exported this tool would fail to find a
-// perfectly good default ~/.kube/config.
 func buildRESTConfig(kubeconfigPath string) (*rest.Config, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if kubeconfigPath != "" {
@@ -188,8 +187,10 @@ func ensureNamespace(ctx context.Context, cs *kubernetes.Clientset, ns string) e
 }
 
 // createBurst creates count pods concurrently so they hit the API server (and
-// the node's kubelet) as close to simultaneously as possible.
-func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string, count int, targetNode, target, initContainerMode string) (map[string]time.Time, []string) {
+// the node's kubelet) as close to simultaneously as possible. It also returns
+// each pod's actual init container mode, which only varies per-pod under
+// initContainerModeMixed — see podModeForIndex.
+func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string, count int, targetNode, target, initContainerMode string) (map[string]time.Time, []string, map[string]string) {
 	names := make([]string, count)
 	createdAt := make([]time.Time, count)
 	var mu sync.Mutex
@@ -207,7 +208,7 @@ func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string
 				log.Printf("create serviceaccount %s: %v", sa, err)
 				return
 			}
-			pod := podSpec(name, runID, sa, targetNode, target, initContainerMode)
+			pod := podSpec(name, runID, sa, targetNode, target, podModeForIndex(initContainerMode, i))
 			t := time.Now()
 			if _, err := cs.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 				log.Printf("create pod %s: %v", name, err)
@@ -223,25 +224,40 @@ func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string
 	}
 
 	byName := make(map[string]time.Time, count)
+	modeByName := make(map[string]string, count)
 	for i, name := range names {
 		if !createdAt[i].IsZero() {
 			byName[name] = createdAt[i]
 		}
+		modeByName[name] = podModeForIndex(initContainerMode, i)
 	}
-	return byName, names
+	return byName, names, modeByName
 }
 
 const exitMarkerPrefix = "ztunnel-diag-exit="
 
 // Init container modes for podSpec, controlled by --init-container-mode.
-// "noop" exists to isolate whether adding *any* init container (extra
-// container-start overhead under a saturated node) is doing the real work,
-// independent of the probe's own retry logic — see README.
 const (
 	initContainerModeNone  = "none"
 	initContainerModeNoop  = "noop"
 	initContainerModeProbe = "probe"
+	// initContainerModeMixed alternates noop/probe by pod index within one
+	// burst, so both experience identical moment-by-moment congestion.
+	// See README "Does noop's delay scale with the problem?".
+	initContainerModeMixed = "mixed"
 )
+
+// podModeForIndex resolves the per-pod init container mode for pod i of a
+// burst.
+func podModeForIndex(mode string, i int) string {
+	if mode != initContainerModeMixed {
+		return mode
+	}
+	if i%2 == 0 {
+		return initContainerModeNoop
+	}
+	return initContainerModeProbe
+}
 
 // initContainerRetries, initContainerProbeTimeout and
 // initContainerRetryInterval bound the mitigation init container's probe
@@ -264,20 +280,7 @@ const (
 const initOutcomeMarkerPrefix = "ztunnel-diag-init-outcome="
 
 // podSpec builds the burst workload pod, pinned to targetNode (by hostname)
-// so the whole burst saturates one specific node. withInitContainer adds the
-// mitigation under test: an init container that retries a real HTTPS request
-// to the k8s API server (via its injected env vars, not DNS — see
-// resolveTargetToClusterIP for why DNS masks the thing being measured) until
-// it actually gets an HTTP response line back — proof ztunnel forwarded the
-// connection all the way to a real answer, not just that a local connect()
-// succeeded. ztunnel accepts a held connection's TCP handshake locally before
-// it knows whether to forward or drop it, so a bare connect-only check (e.g.
-// nc -z) reports success instantly regardless of whether identity has
-// landed; a plain byte round trip doesn't work either, since the API
-// server's TLS stack silently closes on malformed input instead of replying.
-// wget's "server returned error: HTTP/1.1 403 Forbidden" on an unauthorized
-// request is unambiguous proof of a genuine forward. Fails open (always
-// exits 0) so a pod that never gets there still starts.
+// so the whole burst saturates one specific node.
 func podSpec(name, runID, serviceAccount, targetNode, target, initContainerMode string) *corev1.Pod {
 	spec := corev1.PodSpec{
 		ServiceAccountName: serviceAccount,
@@ -340,10 +343,7 @@ func connectionFailed(workloadLog string) (failed, known bool) {
 	return code != 0, true
 }
 
-// initContainerOutcome reads back the init container's own outcome marker
-// (see podSpec): "ready" if its probe loop succeeded before exhausting its
-// retry budget, false with known=false if the marker never showed up (the
-// mitigation wasn't enabled, or the init container's log wasn't available).
+// initContainerOutcome reads back the init container's own outcome marker.
 func initContainerOutcome(initLog string) (ready, known bool, attempts int, elapsed time.Duration) {
 	idx := strings.Index(initLog, initOutcomeMarkerPrefix)
 	if idx == -1 {
@@ -427,17 +427,21 @@ func collectPodIPs(ctx context.Context, w watch.Interface, podNames []string, wi
 	return patchTimes
 }
 
-// buildPodEvents turns raw timestamps into report.PodEvents. Note IPAssignedAt
-// here is the client-observed pod-creation time, not a node-local sandbox
-// timestamp — see README.md "What this measures" for why that's the honest
-// proxy available without shelling into the node.
-func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS, ztunnelLabel, targetHost string, podNames []string, createdAt, patchTimes map[string]time.Time, initContainerMode string) []report.PodEvent {
+// buildPodEvents turns raw timestamps into report.PodEvents.
+func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS, ztunnelLabel, targetHost string, podNames []string, createdAt, patchTimes map[string]time.Time, podModes map[string]string) []report.PodEvent {
 	ztunnelLogs := fetchZtunnelLogs(ctx, cs, ztunnelNS, ztunnelLabel)
 	workloadLogs := fetchContainerLogs(ctx, cs, ns, "workload", podNames)
-	var initLogs map[string]string
-	if initContainerMode == initContainerModeProbe {
-		initLogs = fetchContainerLogs(ctx, cs, ns, "wait-for-ztunnel-identity", podNames)
+	var probeNames []string
+	for _, name := range podNames {
+		if podModes[name] == initContainerModeProbe {
+			probeNames = append(probeNames, name)
+		}
 	}
+	var initLogs map[string]string
+	if len(probeNames) > 0 {
+		initLogs = fetchContainerLogs(ctx, cs, ns, "wait-for-ztunnel-identity", probeNames)
+	}
+	firstContainerStart := fetchFirstContainerStartTimes(ctx, cs, ns, podNames)
 
 	events := make([]report.PodEvent, 0, len(podNames))
 	for _, name := range podNames {
@@ -461,19 +465,36 @@ func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS
 		routingDelay, routingDelayKnown := ztlog.RoutingDelay(ztunnelLogs, name, ns, targetHost)
 		connFailed, connFailedKnown := connectionFailed(workloadLogs[name])
 		initReady, initKnown, initAttempts, initElapsed := initContainerOutcome(initLogs[name])
+
+		var upperBound, lowerBound time.Duration
+		var upperBoundKnown, lowerBoundKnown bool
+		if anchor, ok := firstContainerStart[name]; ok {
+			if identityReadyAt, ok := ztlog.IdentityReadyAt(ztunnelLogs, name, ns); ok {
+				upperBound, upperBoundKnown = identityReadyAt.Sub(anchor), true
+			}
+			if lastFailureAt, ok := ztlog.LastPreSuccessFailureAt(ztunnelLogs, name, ns); ok {
+				lowerBound, lowerBoundKnown = lastFailureAt.Sub(anchor), true
+			}
+		}
+
 		events = append(events, report.PodEvent{
-			Name:                      name,
-			IPAssignedAt:              created,
-			IPPatchedAtAPI:            patchedAt,
-			ZtunnelTimeout:            timedOut,
-			RoutingDelay:              routingDelay,
-			RoutingDelayKnown:         routingDelayKnown,
-			ConnectionFailed:          connFailed,
-			ConnectionFailedKnown:     connFailedKnown,
-			InitContainerOutcomeKnown: initKnown,
-			InitContainerReady:        initReady,
-			InitContainerAttempts:     initAttempts,
-			InitContainerElapsed:      initElapsed,
+			Name:                              name,
+			InitContainerMode:                 podModes[name],
+			IPAssignedAt:                      created,
+			IPPatchedAtAPI:                    patchedAt,
+			ZtunnelTimeout:                    timedOut,
+			RoutingDelay:                      routingDelay,
+			RoutingDelayKnown:                 routingDelayKnown,
+			ConnectionFailed:                  connFailed,
+			ConnectionFailedKnown:             connFailedKnown,
+			InitContainerOutcomeKnown:         initKnown,
+			InitContainerReady:                initReady,
+			InitContainerAttempts:             initAttempts,
+			InitContainerElapsed:              initElapsed,
+			CounterfactualWaitUpperBound:      upperBound,
+			CounterfactualWaitUpperBoundKnown: upperBoundKnown,
+			CounterfactualWaitLowerBound:      lowerBound,
+			CounterfactualWaitLowerBoundKnown: lowerBoundKnown,
 		})
 	}
 	return events
@@ -498,11 +519,7 @@ func fetchZtunnelLogs(ctx context.Context, cs *kubernetes.Clientset, ns, label s
 }
 
 // fetchContainerLogs reads back one named container's log from each of
-// podNames, concurrently — up to len(podNames) API calls, so this is not
-// worth doing sequentially. container must be given explicitly: the API
-// requires it once a pod has more than one container (workload plus,
-// optionally, the mitigation init container), so this can't rely on a
-// pod-wide default.
+// podNames, concurrently.
 func fetchContainerLogs(ctx context.Context, cs *kubernetes.Clientset, ns, container string, podNames []string) map[string]string {
 	logs := make(map[string]string, len(podNames))
 	var mu sync.Mutex
@@ -523,6 +540,56 @@ func fetchContainerLogs(ctx context.Context, cs *kubernetes.Clientset, ns, conta
 	}
 	wg.Wait()
 	return logs
+}
+
+// fetchFirstContainerStartTimes returns, for each pod, when its first
+// container (init, if any, else "workload") actually started running.
+func fetchFirstContainerStartTimes(ctx context.Context, cs *kubernetes.Clientset, ns string, podNames []string) map[string]time.Time {
+	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Printf("list pods for container start times: %v", err)
+		return nil
+	}
+	want := make(map[string]bool, len(podNames))
+	for _, n := range podNames {
+		want[n] = true
+	}
+	result := make(map[string]time.Time, len(podNames))
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if !want[p.Name] {
+			continue
+		}
+		if t, ok := firstContainerStartTime(p); ok {
+			result[p.Name] = t
+		}
+	}
+	return result
+}
+
+// firstContainerStartTime returns when kubelet actually started this pod's
+// first container: the init container if one is present, else "workload".
+func firstContainerStartTime(pod *corev1.Pod) (time.Time, bool) {
+	if len(pod.Status.InitContainerStatuses) > 0 {
+		return containerStartTime(pod.Status.InitContainerStatuses[0])
+	}
+	for _, c := range pod.Status.ContainerStatuses {
+		if c.Name == "workload" {
+			return containerStartTime(c)
+		}
+	}
+	return time.Time{}, false
+}
+
+func containerStartTime(c corev1.ContainerStatus) (time.Time, bool) {
+	switch {
+	case c.State.Running != nil:
+		return c.State.Running.StartedAt.Time, true
+	case c.State.Terminated != nil:
+		return c.State.Terminated.StartedAt.Time, true
+	default:
+		return time.Time{}, false
+	}
 }
 
 func readPodLog(ctx context.Context, cs *kubernetes.Clientset, ns, podName string, opts *corev1.PodLogOptions) (string, error) {
@@ -605,6 +672,10 @@ func printSummary(rep report.Report) {
 			rep.InitContainerReadyCount, rep.InitContainerKnownCount, rep.InitContainerExhaustedCount, rep.InitContainerKnownCount,
 			rep.MeanInitContainerElapsed, rep.MaxInitContainerElapsed)
 	}
+	if rep.MitigationComparableCount > 0 {
+		fmt.Printf("  per-pod causal verdict (of %d successful pods with counterfactual data): %d definitely unnecessary, %d definitely necessary, %d ambiguous\n",
+			rep.MitigationComparableCount, rep.MitigationDefinitelyUnnecessary, rep.MitigationDefinitelyNecessary, rep.MitigationAmbiguous)
+	}
 	fmt.Println()
 	for _, p := range rep.Pods {
 		flag := ""
@@ -630,6 +701,119 @@ func printSummary(rep report.Report) {
 			}
 			initStatus = fmt.Sprintf(" init=%s(%d,%s)", outcome, p.InitContainerAttempts, p.InitContainerElapsed)
 		}
-		fmt.Printf("  %-40s patch=%-10s %-24s %s%s%s\n", p.Name, p.PatchLatency, routing, conn, initStatus, flag)
+		verdict := ""
+		if p.ConnectionFailedKnown && !p.ConnectionFailed && p.CounterfactualWaitUpperBoundKnown {
+			switch {
+			case p.CounterfactualWaitUpperBound <= 5*time.Second:
+				verdict = fmt.Sprintf(" [unnecessary, upper=%s]", p.CounterfactualWaitUpperBound)
+			case p.CounterfactualWaitLowerBoundKnown && p.CounterfactualWaitLowerBound > 5*time.Second:
+				verdict = fmt.Sprintf(" [NECESSARY, lower=%s]", p.CounterfactualWaitLowerBound)
+			default:
+				verdict = fmt.Sprintf(" [ambiguous, upper=%s]", p.CounterfactualWaitUpperBound)
+			}
+		}
+		fmt.Printf("  %-40s patch=%-10s %-24s %s%s%s%s\n", p.Name, p.PatchLatency, routing, conn, initStatus, verdict, flag)
 	}
+}
+
+// printMixedModeCorrelation reports whether noop's container-transition
+// overhead (CounterfactualWaitUpperBound, clean under noop since the
+// workload's own connection resolves in microseconds once attempted — see
+// README) and probe's measured identity-wait (InitContainerElapsed, its own
+// retry loop's timing) co-vary across a single mixed-mode burst, where both
+// experience identical moment-by-moment congestion. Pods are bucketed by
+// creation order (a proxy for elapsed time into the burst) rather than
+// compared pod-by-pod, since noop and probe pods are never the same pod.
+//
+// If the two curves move together, that's evidence noop's delay is coupled
+// to the same bottleneck causing the race, not a fixed amount that happens
+// to be large enough on this specific cluster. If probe's wait varies while
+// noop's overhead stays flat, noop has headroom here, not scaling — the
+// result that should block recommending it as a general mitigation.
+func printMixedModeCorrelation(pods []report.PodResult) {
+	type sample struct {
+		idx   int
+		value time.Duration
+	}
+	var noop, probe []sample
+	for i, p := range pods {
+		switch p.InitContainerMode {
+		case initContainerModeNoop:
+			if p.CounterfactualWaitUpperBoundKnown {
+				noop = append(noop, sample{i, p.CounterfactualWaitUpperBound})
+			}
+		case initContainerModeProbe:
+			if p.InitContainerOutcomeKnown {
+				probe = append(probe, sample{i, p.InitContainerElapsed})
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("mixed-mode correlation (does noop's transition overhead track probe's measured identity-wait?)")
+	fmt.Printf("  noop samples: %d   probe samples: %d\n", len(noop), len(probe))
+	if len(noop) == 0 || len(probe) == 0 {
+		fmt.Println("  not enough data on one side to compare")
+		return
+	}
+
+	const buckets = 5
+	bucketMeans := func(samples []sample) []float64 {
+		means := make([]float64, buckets)
+		counts := make([]int, buckets)
+		for _, s := range samples {
+			b := s.idx * buckets / len(pods)
+			if b >= buckets {
+				b = buckets - 1
+			}
+			means[b] += s.value.Seconds()
+			counts[b]++
+		}
+		for b := range means {
+			if counts[b] > 0 {
+				means[b] /= float64(counts[b])
+			}
+		}
+		return means
+	}
+	noopMeans := bucketMeans(noop)
+	probeMeans := bucketMeans(probe)
+
+	fmt.Printf("  %-6s", "noop")
+	for _, m := range noopMeans {
+		fmt.Printf(" %6.1fs", m)
+	}
+	fmt.Println("   (mean transition overhead, earliest-created pods left to latest)")
+	fmt.Printf("  %-6s", "probe")
+	for _, m := range probeMeans {
+		fmt.Printf(" %6.1fs", m)
+	}
+	fmt.Println("   (mean measured identity-wait, same buckets)")
+	fmt.Printf("  bucket-to-bucket correlation (Pearson r, -1..1): %.2f\n", pearson(noopMeans, probeMeans))
+}
+
+func pearson(a, b []float64) float64 {
+	n := len(a)
+	if n == 0 || n != len(b) {
+		return 0
+	}
+	var meanA, meanB float64
+	for i := range a {
+		meanA += a[i]
+		meanB += b[i]
+	}
+	meanA /= float64(n)
+	meanB /= float64(n)
+	var num, denomA, denomB float64
+	for i := range a {
+		da := a[i] - meanA
+		db := b[i] - meanB
+		num += da * db
+		denomA += da * da
+		denomB += db * db
+	}
+	if denomA == 0 || denomB == 0 {
+		return 0
+	}
+	return num / math.Sqrt(denomA*denomB)
 }

@@ -100,6 +100,74 @@ func TestRoutingDelayRequiresBothMarkers(t *testing.T) {
 	}
 }
 
+func TestIdentityReadyAtIgnoresDestination(t *testing.T) {
+	// Unlike RoutingDelay, IdentityReadyAt deliberately does NOT scope by
+	// dst.service: ztunnel's identity gate is per source workload, not per
+	// destination, so the first successful connection to ANYWHERE (e.g. a
+	// mitigation init container's own probe to the API server) is real proof
+	// identity had landed by that moment — an upper bound on the true
+	// readiness time, since it can only be detected once something tries.
+	pod, ns := "ztunnel-diag-run1-0", "ztunnel-diag"
+	trace := []string{
+		`2026-08-19T21:00:01.000000Z	debug	access	connection opened	src.workload="` + pod + `" dst.service="kubernetes.default.svc.cluster.local"`,
+		`2026-08-19T21:00:06.000000Z	debug	access	connection opened	src.workload="` + pod + `" dst.service="echo-target.ztunnel-diag.svc.cluster.local"`,
+	}
+
+	got, ok := IdentityReadyAt(trace, pod, ns)
+	if !ok {
+		t.Fatal("IdentityReadyAt: ok = false, want true")
+	}
+	want, _ := time.Parse(time.RFC3339Nano, "2026-08-19T21:00:01.000000Z")
+	if !got.Equal(want) {
+		t.Errorf("IdentityReadyAt = %v, want %v (should pick the earlier connection to any destination)", got, want)
+	}
+}
+
+func TestIdentityReadyAtNoMatchReturnsFalse(t *testing.T) {
+	if _, ok := IdentityReadyAt(realDebugTrace, "some-other-pod", "ztunnel-diag"); ok {
+		t.Error("IdentityReadyAt: ok = true for a pod not present in the logs, want false")
+	}
+}
+
+func TestLastPreSuccessFailureAt(t *testing.T) {
+	// Real line format captured from a saturated-node run: the failure
+	// embeds the pod's identity the same way the timeout warning does
+	// (`<pod>.<namespace> (<pod>)`), just inside a longer error= string
+	// rather than a quoted phrase.
+	pod, ns := "ztunnel-diag-1787536400097448000-0", "ztunnel-diag"
+	trace := []string{
+		`2026-08-24T01:53:53.071068Z	debug	state:proxy{wl=` + pod + `.` + ns + `}:outbound{id=1}	wait for workload	wl=` + pod + `.` + ns + ` (` + pod + `)`,
+		`2026-08-24T01:53:58.072727Z	warn	access	connection failed	src.addr=10.244.1.104:35211 dst.addr=10.96.0.1:443 direction="outbound" error="failed to fetch information about local workload: ` + pod + `.` + ns + ` (` + pod + `)"`,
+		`2026-08-24T01:54:03.430460Z	debug	access	connection opened	src.workload="` + pod + `" dst.service="echo-target.ztunnel-diag.svc.cluster.local"`,
+	}
+
+	got, ok := LastPreSuccessFailureAt(trace, pod, ns)
+	if !ok {
+		t.Fatal("LastPreSuccessFailureAt: ok = false, want true")
+	}
+	want, _ := time.Parse(time.RFC3339Nano, "2026-08-24T01:53:58.072727Z")
+	if !got.Equal(want) {
+		t.Errorf("LastPreSuccessFailureAt = %v, want %v", got, want)
+	}
+}
+
+func TestLastPreSuccessFailureAtNoFailuresReturnsFalse(t *testing.T) {
+	if _, ok := LastPreSuccessFailureAt(realDebugTrace, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag"); ok {
+		t.Error("LastPreSuccessFailureAt: ok = true with no failure lines, want false")
+	}
+}
+
+func TestLastPreSuccessFailureAtDoesNotFalsePositiveOnPrefixCollision(t *testing.T) {
+	// pod-6's own failure line must not match a lookup for pod-60 or vice
+	// versa — same class of bug MatchesTimeoutForPod already guards against.
+	trace := []string{
+		`2026-08-24T01:53:58.072727Z	warn	access	connection failed	src.addr=10.244.1.104:35211 dst.addr=10.96.0.1:443 direction="outbound" error="failed to fetch information about local workload: ztunnel-diag-60.ztunnel-diag (ztunnel-diag-60)"`,
+	}
+	if _, ok := LastPreSuccessFailureAt(trace, "ztunnel-diag-6", "ztunnel-diag"); ok {
+		t.Error("LastPreSuccessFailureAt: ok = true, want false (pod-6 matched pod-60's failure line)")
+	}
+}
+
 func TestRoutingDelaySkipsConnectionsToOtherDestinations(t *testing.T) {
 	// A mitigation init container's own probe connection (see cmd/ztunnel-diag)
 	// shares the workload's pod name/identity from ztunnel's point of view —

@@ -17,6 +17,10 @@ type PodEvent struct {
 	IPPatchedAtAPI time.Time // when kubelet's status patch landed on the API server
 	ZtunnelTimeout bool      // whether ztunnel logged a "timed out waiting for workload" for this pod
 
+	// InitContainerMode is this pod's actual init container mode ("", "noop"
+	// or "probe")
+	InitContainerMode string
+
 	// RoutingDelay is how long ztunnel itself took, from first needing this
 	// workload's identity to actually routing its connection, as opposed to
 	// PatchLatency below. Only meaningful when RoutingDelayKnown is true
@@ -38,7 +42,23 @@ type PodEvent struct {
 	InitContainerReady        bool
 	InitContainerAttempts     int
 	InitContainerElapsed      time.Duration
+
+	// CounterfactualWaitUpperBound is how long this pod's connection would
+	// have had to wait for identity had it been attempted at the moment its
+	// first container (init, if any, else workload) actually started, i.e.
+	// under no mitigation at all. It's an upper bound, not an exact value.
+	CounterfactualWaitUpperBound      time.Duration
+	CounterfactualWaitUpperBoundKnown bool
+
+	// CounterfactualWaitLowerBound is a lower bound on the same quantity,
+	// derived from a mitigation's own failed retry attempts (if any exist —
+	// e.g. probe's retries; noop and no mitigation never produce failures to
+	// anchor this on).
+	CounterfactualWaitLowerBound      time.Duration
+	CounterfactualWaitLowerBoundKnown bool
 }
+
+const ztunnelHoldTimeout = 5 * time.Second
 
 // PodResult is one pod's computed latency alongside its raw event.
 type PodResult struct {
@@ -80,6 +100,21 @@ type Report struct {
 	InitContainerExhaustedCount int
 	MeanInitContainerElapsed    time.Duration
 	MaxInitContainerElapsed     time.Duration
+
+	// Mitigation* classifies pods whose real connection succeeded, using the
+	// CounterfactualWait bounds above — a per-pod causal verdict, not a
+	// population-level correlation:
+	//   - MitigationDefinitelyUnnecessary: upper bound <= ztunnel's 5s hold —
+	//     identity would have been ready in time even with zero mitigation.
+	//   - MitigationDefinitelyNecessary: lower bound > 5s — proven necessary,
+	//     since even the earliest possible true identity-ready moment
+	//     exceeds the hold.
+	//   - MitigationAmbiguous: neither bound resolves it — genuinely unknown
+	//     without independent instrumentation of ztunnel's internal state.
+	MitigationComparableCount       int
+	MitigationDefinitelyUnnecessary int
+	MitigationDefinitelyNecessary   int
+	MitigationAmbiguous             int
 }
 
 // Compute derives per-pod latencies and aggregate statistics from a set of
@@ -136,6 +171,17 @@ func Compute(events []PodEvent) Report {
 			}
 			initElapsedTotal += e.InitContainerElapsed
 			initElapsed = append(initElapsed, e.InitContainerElapsed)
+		}
+		if e.ConnectionFailedKnown && !e.ConnectionFailed && e.CounterfactualWaitUpperBoundKnown {
+			r.MitigationComparableCount++
+			switch {
+			case e.CounterfactualWaitUpperBound <= ztunnelHoldTimeout:
+				r.MitigationDefinitelyUnnecessary++
+			case e.CounterfactualWaitLowerBoundKnown && e.CounterfactualWaitLowerBound > ztunnelHoldTimeout:
+				r.MitigationDefinitelyNecessary++
+			default:
+				r.MitigationAmbiguous++
+			}
 		}
 	}
 

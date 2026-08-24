@@ -210,3 +210,65 @@ func TestComputeTimeoutVsFailureBreakdown(t *testing.T) {
 		t.Errorf("OKButTimedOut = %d, want 1", got.OKButTimedOut)
 	}
 }
+
+func TestComputeMitigationNecessityClassification(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	events := []PodEvent{
+		// upper bound <= 5s: proven unnecessary (this is what every `none`-mode
+		// success looks like, trivially, since it succeeded on one shot).
+		{
+			Name: "a", IPAssignedAt: base, IPPatchedAtAPI: base,
+			ConnectionFailed: false, ConnectionFailedKnown: true,
+			CounterfactualWaitUpperBound: 3 * time.Second, CounterfactualWaitUpperBoundKnown: true,
+		},
+		// upper bound > 5s, lower bound (from probe's own retries) also > 5s:
+		// proven necessary.
+		{
+			Name: "b", IPAssignedAt: base, IPPatchedAtAPI: base,
+			ConnectionFailed: false, ConnectionFailedKnown: true,
+			CounterfactualWaitUpperBound: 12 * time.Second, CounterfactualWaitUpperBoundKnown: true,
+			CounterfactualWaitLowerBound: 6 * time.Second, CounterfactualWaitLowerBoundKnown: true,
+		},
+		// upper bound > 5s, no lower bound at all (typical noop case): ambiguous.
+		{
+			Name: "c", IPAssignedAt: base, IPPatchedAtAPI: base,
+			ConnectionFailed: false, ConnectionFailedKnown: true,
+			CounterfactualWaitUpperBound: 8 * time.Second, CounterfactualWaitUpperBoundKnown: true,
+		},
+		// upper bound > 5s, lower bound known but still <= 5s: not enough to
+		// prove necessity either — still ambiguous.
+		{
+			Name: "d", IPAssignedAt: base, IPPatchedAtAPI: base,
+			ConnectionFailed: false, ConnectionFailedKnown: true,
+			CounterfactualWaitUpperBound: 8 * time.Second, CounterfactualWaitUpperBoundKnown: true,
+			CounterfactualWaitLowerBound: 2 * time.Second, CounterfactualWaitLowerBoundKnown: true,
+		},
+		// failed pod: excluded entirely, the causal question doesn't apply.
+		{
+			Name: "e", IPAssignedAt: base, IPPatchedAtAPI: base,
+			ConnectionFailed: true, ConnectionFailedKnown: true,
+			CounterfactualWaitUpperBound: 20 * time.Second, CounterfactualWaitUpperBoundKnown: true,
+		},
+		// no counterfactual data at all (e.g. RUST_LOG=debug wasn't set):
+		// excluded, not counted as ambiguous.
+		{
+			Name: "f", IPAssignedAt: base, IPPatchedAtAPI: base,
+			ConnectionFailed: false, ConnectionFailedKnown: true,
+		},
+	}
+
+	got := Compute(events)
+
+	if got.MitigationComparableCount != 4 {
+		t.Errorf("MitigationComparableCount = %d, want 4", got.MitigationComparableCount)
+	}
+	if got.MitigationDefinitelyUnnecessary != 1 {
+		t.Errorf("MitigationDefinitelyUnnecessary = %d, want 1", got.MitigationDefinitelyUnnecessary)
+	}
+	if got.MitigationDefinitelyNecessary != 1 {
+		t.Errorf("MitigationDefinitelyNecessary = %d, want 1", got.MitigationDefinitelyNecessary)
+	}
+	if got.MitigationAmbiguous != 2 {
+		t.Errorf("MitigationAmbiguous = %d, want 2", got.MitigationAmbiguous)
+	}
+}

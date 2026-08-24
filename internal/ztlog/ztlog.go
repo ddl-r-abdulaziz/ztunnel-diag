@@ -69,6 +69,50 @@ func RoutingDelay(logs []string, pod, namespace, targetService string) (time.Dur
 	return end.Sub(start), true
 }
 
+// workloadIdentityMarker is the exact substring ztunnel embeds in prose
+// error messages to identify a workload — `<pod>.<namespace> (<pod>)`.
+func workloadIdentityMarker(pod, namespace string) string {
+	return pod + "." + namespace + " (" + pod + ")"
+}
+
+// IdentityReadyAt returns the timestamp of the first connection ztunnel
+// opened for this pod, to any destination — unlike RoutingDelay, this is
+// deliberately NOT scoped to a specific target. ztunnel's identity gate is
+// per source workload, not per destination, so a mitigation init container's
+// own probe connection succeeding is just as much proof identity had landed
+// as the real workload's connection succeeding. This is always an upper
+// bound on the true identity-ready moment: it can only be detected once
+// something actually tries, and identity may have landed earlier without any
+// attempt happening to reveal it.
+func IdentityReadyAt(logs []string, pod, namespace string) (time.Time, bool) {
+	openMarker := `src.workload="` + pod + `"`
+	for _, line := range logs {
+		if strings.Contains(line, "connection opened") && strings.Contains(line, openMarker) {
+			return parseTimestamp(line)
+		}
+	}
+	return time.Time{}, false
+}
+
+// LastPreSuccessFailureAt returns the timestamp of the last "connection
+// failed" line for this pod. Intended for pods whose real connection
+// eventually succeeded (RoutingDelay/IdentityReadyAt known).
+func LastPreSuccessFailureAt(logs []string, pod, namespace string) (time.Time, bool) {
+	marker := workloadIdentityMarker(pod, namespace)
+	var last time.Time
+	found := false
+	for _, line := range logs {
+		if !strings.Contains(line, "connection failed") || !strings.Contains(line, marker) {
+			continue
+		}
+		if ts, ok := parseTimestamp(line); ok {
+			last = ts
+			found = true
+		}
+	}
+	return last, found
+}
+
 func parseTimestamp(line string) (time.Time, bool) {
 	field, _, found := strings.Cut(line, "\t")
 	if !found {

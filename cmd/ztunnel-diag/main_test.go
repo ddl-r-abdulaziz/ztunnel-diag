@@ -239,6 +239,67 @@ func TestResolveTargetToClusterIPFallsBackWhenServiceNotFound(t *testing.T) {
 	}
 }
 
+func TestFirstContainerStartTimeUsesInitContainerWhenPresent(t *testing.T) {
+	// The init container is what actually experienced the same kubelet/CRI
+	// scheduling backlog a bare workload container would have — its start
+	// time, not ztunnel's much-earlier netns-registration event, is the
+	// right anchor for "when would this pod's first container have started
+	// under no mitigation at all."
+	startedInit := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 5, 0, time.UTC))
+	startedWorkload := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 10, 0, time.UTC))
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "wait-for-ztunnel-identity", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{StartedAt: startedInit}}},
+			},
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "workload", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: startedWorkload}}},
+			},
+		},
+	}
+
+	got, ok := firstContainerStartTime(pod)
+	if !ok {
+		t.Fatal("firstContainerStartTime: ok = false, want true")
+	}
+	if !got.Equal(startedInit.Time) {
+		t.Errorf("firstContainerStartTime = %v, want the init container's start time %v", got, startedInit.Time)
+	}
+}
+
+func TestFirstContainerStartTimeFallsBackToWorkloadWithNoInitContainer(t *testing.T) {
+	started := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 5, 0, time.UTC))
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "workload", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{StartedAt: started}}},
+			},
+		},
+	}
+
+	got, ok := firstContainerStartTime(pod)
+	if !ok {
+		t.Fatal("firstContainerStartTime: ok = false, want true")
+	}
+	if !got.Equal(started.Time) {
+		t.Errorf("firstContainerStartTime = %v, want %v", got, started.Time)
+	}
+}
+
+func TestFirstContainerStartTimeUnknownWhenInitContainerHasNotStarted(t *testing.T) {
+	pod := &corev1.Pod{
+		Status: corev1.PodStatus{
+			InitContainerStatuses: []corev1.ContainerStatus{
+				{Name: "wait-for-ztunnel-identity", State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "PodInitializing"}}},
+			},
+		},
+	}
+
+	if _, ok := firstContainerStartTime(pod); ok {
+		t.Error("firstContainerStartTime: ok = true for a not-yet-started init container, want false")
+	}
+}
+
 func TestPodSpecOmitsInitContainerByDefault(t *testing.T) {
 	pod := podSpec("pod-a", "run-1", "sa-a", "ztunnel-diag-m02", "echo-target.ztunnel-diag.svc.cluster.local:8080", initContainerModeNone)
 
@@ -399,5 +460,29 @@ func TestPodSpecPinsToTargetNode(t *testing.T) {
 
 	if got := pod.Spec.NodeSelector["kubernetes.io/hostname"]; got != "ztunnel-diag-m02" {
 		t.Fatalf("NodeSelector[kubernetes.io/hostname] = %q, want %q", got, "ztunnel-diag-m02")
+	}
+}
+
+func TestPodModeForIndexAlternatesUnderMixedMode(t *testing.T) {
+	// "mixed" exists to test whether noop's container-transition overhead
+	// and probe's measured identity delay co-vary under identical, moment-
+	// by-moment congestion — only possible if both experience the same
+	// burst, so pods must alternate within one run rather than across runs.
+	cases := map[string]struct {
+		mode string
+		i    int
+		want string
+	}{
+		"even index is noop":                      {mode: initContainerModeMixed, i: 0, want: initContainerModeNoop},
+		"odd index is probe":                      {mode: initContainerModeMixed, i: 1, want: initContainerModeProbe},
+		"later even index is noop":                {mode: initContainerModeMixed, i: 42, want: initContainerModeNoop},
+		"non-mixed mode passes through unchanged": {mode: initContainerModeProbe, i: 3, want: initContainerModeProbe},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := podModeForIndex(tc.mode, tc.i); got != tc.want {
+				t.Fatalf("podModeForIndex(%q, %d) = %q, want %q", tc.mode, tc.i, got, tc.want)
+			}
+		})
 	}
 }
