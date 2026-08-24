@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestStartHostLoadGoroutinesExitAfterStop(t *testing.T) {
@@ -59,15 +64,113 @@ func TestPodSpecWorkloadContainerMakesARealConnection(t *testing.T) {
 
 func TestPodSpecWorkloadConnectionOutlivesZtunnelsFiveSecondHold(t *testing.T) {
 	// ztunnel acks the connection immediately and holds it open for up to 5s
-	// waiting for routing info to arrive, only then forwarding or dropping
-	// it. wget's own request timeout must comfortably exceed that 5s hold,
-	// or it'll give up and disconnect before the hold could ever resolve —
-	// masking a real timeout as "probe gave up," not "ztunnel timed out."
+	// waiting for routing info to arrive, then either forwards or drops it.
+	// wget's own timeout must comfortably exceed not just that 5s hold but
+	// the worst observed case of a connection that *does* still get forwarded
+	// late (routing delays up to ~11s have been observed on a busy node,
+	// see README) — too tight a budget makes wget give up first, which would
+	// misreport a real (if slow) success as a ztunnel-caused failure.
 	pod := podSpec("pod-a", "run-1", "sa-a", "ztunnel-diag-m02", "echo-target.ztunnel-diag.svc.cluster.local:8080")
 	command := strings.Join(pod.Spec.Containers[0].Command, " ")
 
-	if !strings.Contains(command, "-T 10") {
-		t.Fatalf("command %q doesn't set a wget timeout comfortably past ztunnel's 5s hold", command)
+	if !strings.Contains(command, "-T 20") {
+		t.Fatalf("command %q doesn't set a wget timeout comfortably past both ztunnel's 5s hold and observed late-forward delays", command)
+	}
+}
+
+func TestPodSpecWorkloadCommandRecordsExitStatus(t *testing.T) {
+	// The report needs to know whether the workload's own connection attempt
+	// actually failed (ztunnel not informed of routing/identity in time),
+	// not just infer it from ztunnel's own logs — so the command must record
+	// wget's exit status somewhere durably readable back (its own container
+	// log) after wget returns.
+	pod := podSpec("pod-a", "run-1", "sa-a", "ztunnel-diag-m02", "echo-target.ztunnel-diag.svc.cluster.local:8080")
+	command := strings.Join(pod.Spec.Containers[0].Command, " ")
+
+	if !strings.Contains(command, exitMarkerPrefix+"$?") {
+		t.Fatalf("command %q doesn't record wget's exit status after it returns", command)
+	}
+}
+
+func TestConnectionFailed(t *testing.T) {
+	tests := map[string]struct {
+		log        string
+		wantFailed bool
+		wantKnown  bool
+	}{
+		"successful wget": {
+			log:        "Connecting to echo-target...\nwget: OK\n" + exitMarkerPrefix + "0\n",
+			wantFailed: false,
+			wantKnown:  true,
+		},
+		"wget timed out waiting for ztunnel to route it": {
+			log:        "Connecting to echo-target...\nwget: download timed out\n" + exitMarkerPrefix + "1\n",
+			wantFailed: true,
+			wantKnown:  true,
+		},
+		"marker never showed up (wget still running or log not yet flushed)": {
+			log:        "Connecting to echo-target...\n",
+			wantFailed: false,
+			wantKnown:  false,
+		},
+		"marker present without trailing newline": {
+			log:        exitMarkerPrefix + "4",
+			wantFailed: true,
+			wantKnown:  true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			failed, known := connectionFailed(tc.log)
+			if failed != tc.wantFailed || known != tc.wantKnown {
+				t.Errorf("connectionFailed(%q) = (%v, %v), want (%v, %v)", tc.log, failed, known, tc.wantFailed, tc.wantKnown)
+			}
+		})
+	}
+}
+
+func TestResolveTargetToClusterIPResolvesServiceDNSName(t *testing.T) {
+	// A workload hitting the target by its k8s Service DNS name makes ztunnel
+	// resolve that DNS query through its own DNS proxy first, which needs the
+	// *source* workload's identity to answer — an identity wait that a client
+	// resolver like musl silently retries on timeout, independently of and
+	// before the real outbound-connect-time hold this tool means to measure
+	// (see README's "what actually gates the timeout"). Targeting the
+	// Service's ClusterIP directly skips DNS so the outbound connect is the
+	// first thing that can hit the hold.
+	cs := fake.NewSimpleClientset(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "echo-target", Namespace: "ztunnel-diag"},
+		Spec:       corev1.ServiceSpec{ClusterIP: "10.96.0.5"},
+	})
+
+	got := resolveTargetToClusterIP(context.Background(), cs, "ztunnel-diag", "echo-target.ztunnel-diag.svc.cluster.local:8080")
+
+	if want := "10.96.0.5:8080"; got != want {
+		t.Errorf("resolveTargetToClusterIP = %q, want %q", got, want)
+	}
+}
+
+func TestResolveTargetToClusterIPLeavesRawIPAlone(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+
+	got := resolveTargetToClusterIP(context.Background(), cs, "ztunnel-diag", "10.96.0.5:8080")
+
+	if want := "10.96.0.5:8080"; got != want {
+		t.Errorf("resolveTargetToClusterIP = %q, want %q", got, want)
+	}
+}
+
+func TestResolveTargetToClusterIPFallsBackWhenServiceNotFound(t *testing.T) {
+	// A --target pointing outside this namespace/cluster (or a typo) must not
+	// make the tool fail outright — fall back to the given target unchanged
+	// and let the workload's own DNS resolution handle it as before.
+	cs := fake.NewSimpleClientset()
+
+	got := resolveTargetToClusterIP(context.Background(), cs, "ztunnel-diag", "echo-target.ztunnel-diag.svc.cluster.local:8080")
+
+	if want := "echo-target.ztunnel-diag.svc.cluster.local:8080"; got != want {
+		t.Errorf("resolveTargetToClusterIP = %q, want %q", got, want)
 	}
 }
 

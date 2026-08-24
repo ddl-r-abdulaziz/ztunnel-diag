@@ -127,3 +127,55 @@ func TestComputeRoutingDelayAllUnknown(t *testing.T) {
 		t.Errorf("Mean/MaxRoutingDelay = %v/%v, want 0/0", got.MeanRoutingDelay, got.MaxRoutingDelay)
 	}
 }
+
+func TestComputeConnectionFailedCountOnlyOverKnownPods(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	events := []PodEvent{
+		{Name: "a", IPAssignedAt: base, IPPatchedAtAPI: base, ConnectionFailed: true, ConnectionFailedKnown: true},
+		{Name: "b", IPAssignedAt: base, IPPatchedAtAPI: base, ConnectionFailed: false, ConnectionFailedKnown: true},
+		{Name: "c", IPAssignedAt: base, IPPatchedAtAPI: base, ConnectionFailed: false, ConnectionFailedKnown: false},
+	}
+
+	got := Compute(events)
+
+	if got.ConnectionFailedKnownCount != 2 {
+		t.Errorf("ConnectionFailedKnownCount = %d, want 2", got.ConnectionFailedKnownCount)
+	}
+	if got.ConnectionFailedCount != 1 {
+		t.Errorf("ConnectionFailedCount = %d, want 1", got.ConnectionFailedCount)
+	}
+}
+
+func TestComputeTimeoutVsFailureBreakdown(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	events := []PodEvent{
+		// expected majority: failed and ztunnel logged the timeout.
+		{Name: "a", IPAssignedAt: base, IPPatchedAtAPI: base, ZtunnelTimeout: true, ConnectionFailed: true, ConnectionFailedKnown: true},
+		// expected majority: succeeded and no timeout logged.
+		{Name: "b", IPAssignedAt: base, IPPatchedAtAPI: base, ZtunnelTimeout: false, ConnectionFailed: false, ConnectionFailedKnown: true},
+		// mismatch: failed for some other reason.
+		{Name: "c", IPAssignedAt: base, IPPatchedAtAPI: base, ZtunnelTimeout: false, ConnectionFailed: true, ConnectionFailedKnown: true},
+		// mismatch: ztunnel warned but the connection still succeeded.
+		{Name: "d", IPAssignedAt: base, IPPatchedAtAPI: base, ZtunnelTimeout: true, ConnectionFailed: false, ConnectionFailedKnown: true},
+		// exit marker never seen: excluded entirely.
+		{Name: "e", IPAssignedAt: base, IPPatchedAtAPI: base, ZtunnelTimeout: true, ConnectionFailed: false, ConnectionFailedKnown: false},
+	}
+
+	got := Compute(events)
+
+	if got.TimeoutVsFailureComparableCount != 4 {
+		t.Errorf("TimeoutVsFailureComparableCount = %d, want 4", got.TimeoutVsFailureComparableCount)
+	}
+	if got.FailedAndTimedOut != 1 {
+		t.Errorf("FailedAndTimedOut = %d, want 1", got.FailedAndTimedOut)
+	}
+	if got.OKNotTimedOut != 1 {
+		t.Errorf("OKNotTimedOut = %d, want 1", got.OKNotTimedOut)
+	}
+	if got.FailedNotTimedOut != 1 {
+		t.Errorf("FailedNotTimedOut = %d, want 1", got.FailedNotTimedOut)
+	}
+	if got.OKButTimedOut != 1 {
+		t.Errorf("OKButTimedOut = %d, want 1", got.OKButTimedOut)
+	}
+}

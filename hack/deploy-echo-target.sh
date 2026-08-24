@@ -38,7 +38,12 @@ spec:
       containers:
         - name: echo-target
           image: busybox:1.36
-          command: ["httpd", "-f", "-p", "8080", "-h", "/tmp"]
+          # busybox httpd 404s on / with no index file in the served
+          # directory — every burst pod's wget would then exit non-zero on
+          # the HTTP response alone, indistinguishable from a real
+          # ztunnel-side connection failure. Seed one so a successful
+          # request actually returns 200.
+          command: ["sh", "-c", "echo ok > /tmp/index.html && httpd -f -p 8080 -h /tmp"]
           ports:
             - containerPort: 8080
 ---

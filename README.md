@@ -40,6 +40,13 @@ node management.
 - **routing delay** (requires `RUST_LOG=debug` on ztunnel — set by
   `hack/setup-minikube-ambient.sh`): how long ztunnel itself took, from first
   needing this workload's identity to actually opening its connection.
+- **connection failed**: whether the workload pod's own `wget` against the
+  target actually failed.
+
+The summary line `ztunnel timeout matches connection failure: N/M pods` breaks
+this into a 2x2 (failed+timeout, failed+no-timeout, ok+timeout, ok+no-timeout). 
+A sizable off-diagonal count means something other than the 5s hold is
+causing or masking failures.
 
 This is an honest proxy, not an exact replay of the original investigation.
 The original istio issue measured the gap between the *node-local* sandbox IP
@@ -124,6 +131,23 @@ worth keeping even though the code isn't:
   precisely pushes istiod/ztunnel into that state was never pinned down
   further than "enough concurrent distinct identities on one saturated
   node."
+- **DNS absorbs and masks the real hold.** The workload's request originally
+  went to the target by its k8s Service DNS name. That routes through
+  ztunnel's own DNS proxy, which needs the *source* workload's identity to
+  answer the query — a wait that hits the same 5s timeout as the real
+  outbound connect (`timed out waiting for workload ... from xds`, logged
+  from a `state:lookup{...}` span). But a client resolver (`musl`, on the
+  busybox probe image) silently retries a timed-out DNS query on a fresh
+  socket; by the time the retry lands, the identity has usually since
+  arrived, DNS resolves, and the real outbound connect — the thing this tool
+  actually means to test — never needs to wait at all. Net effect: 30/100
+  pods logged a ztunnel timeout, `RoutingDelay` was known and under 11s for
+  100/100, and **zero** pods' `wget` ever failed — a result that looked like
+  either "no real repro" or "the timeout log is meaningless," when the actual
+  cause was the probe never reaching the code path in question. Targeting the
+  Service's ClusterIP directly (skip DNS, see `resolveTargetToClusterIP`)
+  fixed it: 97/100 timeouts, 97/100 real `wget` failures, 100/100 agreement
+  between the two.
 - **Methodology bugs found along the way**, in case reproducing this
   elsewhere: a workload pod must make a real outbound connection that
   outlives ztunnel's 5s hold (an idle `sleep`, or a probe that closes itself

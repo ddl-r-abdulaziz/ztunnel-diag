@@ -22,6 +22,12 @@ type PodEvent struct {
 	// PatchLatency below. Only meaningful when RoutingDelayKnown is true
 	RoutingDelay      time.Duration
 	RoutingDelayKnown bool
+
+	// ConnectionFailed is whether the workload pod's own connection attempt
+	// actually failed.
+	// Only meaningful when ConnectionFailedKnown is true.
+	ConnectionFailed      bool
+	ConnectionFailedKnown bool
 }
 
 // PodResult is one pod's computed latency alongside its raw event.
@@ -44,6 +50,18 @@ type Report struct {
 	RoutingDelayCount int
 	MeanRoutingDelay  time.Duration
 	MaxRoutingDelay   time.Duration
+
+	// ConnectionFailed* are aggregated only over pods with
+	// ConnectionFailedKnown — see PodEvent.ConnectionFailed.
+	ConnectionFailedKnownCount int
+	ConnectionFailedCount      int
+
+	// Stats for cross check
+	TimeoutVsFailureComparableCount int
+	FailedAndTimedOut               int
+	FailedNotTimedOut               int
+	OKButTimedOut                   int
+	OKNotTimedOut                   int
 }
 
 // Compute derives per-pod latencies and aggregate statistics from a set of
@@ -69,6 +87,25 @@ func Compute(events []PodEvent) Report {
 		if e.RoutingDelayKnown {
 			routingTotal += e.RoutingDelay
 			routingDelays = append(routingDelays, e.RoutingDelay)
+		}
+		if e.ConnectionFailedKnown {
+			r.ConnectionFailedKnownCount++
+			if e.ConnectionFailed {
+				r.ConnectionFailedCount++
+			}
+		}
+		if e.ConnectionFailedKnown {
+			r.TimeoutVsFailureComparableCount++
+			switch {
+			case e.ConnectionFailed && e.ZtunnelTimeout:
+				r.FailedAndTimedOut++
+			case e.ConnectionFailed && !e.ZtunnelTimeout:
+				r.FailedNotTimedOut++
+			case !e.ConnectionFailed && e.ZtunnelTimeout:
+				r.OKButTimedOut++
+			default:
+				r.OKNotTimedOut++
+			}
 		}
 	}
 

@@ -6,8 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,7 +32,7 @@ func main() {
 	targetNode := flag.String("target-node", "ztunnel-diag-m02", "node the burst pods are pinned to (by hostname) — the node being saturated")
 	window := flag.Duration("window", 60*time.Second, "how long to wait for each pod's status.podIP to appear before giving up on it")
 	settle := flag.Duration("settle", 30*time.Second, "extra time to wait after the observation window before scraping ztunnel's logs — in a large burst, later pods may still be scheduling or mid-connection (with ztunnel's own 5s hold still in flight) when the window closes")
-	target := flag.String("target", "", "host:port every burst pod makes a real HTTP request against (default: echo-target.<namespace>.svc.cluster.local:8080 — see hack/deploy-echo-target.sh, pinned to the *other* node so it stays warm)")
+	target := flag.String("target", "", "host:port every burst pod makes a real HTTP request against (default: echo-target.<namespace>.svc.cluster.local:8080 — see hack/deploy-echo-target.sh, pinned to the *other* node so it stays warm). If host names a Service in --namespace, it's resolved to that Service's ClusterIP before the burst starts so the workload's request skips DNS — going through DNS first lets ztunnel's own DNS-proxy identity wait get silently retried by the client resolver, masking the real outbound-connect-time hold this tool means to measure")
 	ztunnelNamespace := flag.String("ztunnel-namespace", "istio-system", "namespace ztunnel daemonset pods run in")
 	ztunnelLabel := flag.String("ztunnel-label", "app=ztunnel", "label selector for ztunnel pods")
 	keep := flag.Bool("keep", false, "keep the burst pods around after the run instead of deleting them")
@@ -52,6 +55,12 @@ func main() {
 	if err := ensureNamespace(ctx, clientset, *namespace); err != nil {
 		log.Fatalf("ensuring namespace %s: %v", *namespace, err)
 	}
+
+	resolvedTarget := resolveTargetToClusterIP(ctx, clientset, *namespace, *target)
+	if resolvedTarget != *target {
+		log.Printf("resolved target %s to ClusterIP %s, bypassing DNS", *target, resolvedTarget)
+	}
+	*target = resolvedTarget
 
 	ipWatch, err := startPodIPWatch(ctx, clientset, *namespace, runID)
 	if err != nil {
@@ -118,6 +127,29 @@ func buildClientset(kubeconfig string) (*kubernetes.Clientset, error) {
 	return kubernetes.NewForConfig(cfg)
 }
 
+// resolveTargetToClusterIP rewrites a "host:port" target given by k8s Service
+// DNS name into "clusterIP:port", so the workload's request skips DNS
+// entirely.
+func resolveTargetToClusterIP(ctx context.Context, cs kubernetes.Interface, ns, target string) string {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return target
+	}
+	if net.ParseIP(host) != nil {
+		return target
+	}
+	svcName, _, _ := strings.Cut(host, ".")
+	svc, err := cs.CoreV1().Services(ns).Get(ctx, svcName, metav1.GetOptions{})
+	if err != nil {
+		log.Printf("resolve target %s to ClusterIP: service %s/%s: %v (leaving target as-is, DNS resolution will mask ztunnel's identity wait)", target, ns, svcName, err)
+		return target
+	}
+	if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
+		return target
+	}
+	return net.JoinHostPort(svc.Spec.ClusterIP, port)
+}
+
 func ensureNamespace(ctx context.Context, cs *kubernetes.Clientset, ns string) error {
 	_, err := cs.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
 	if err == nil {
@@ -173,6 +205,8 @@ func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string
 	return byName, names
 }
 
+const exitMarkerPrefix = "ztunnel-diag-exit="
+
 // podSpec builds the burst workload pod, pinned to targetNode (by hostname)
 // so the whole burst saturates one specific node.
 func podSpec(name, runID, serviceAccount, targetNode, target string) *corev1.Pod {
@@ -186,12 +220,33 @@ func podSpec(name, runID, serviceAccount, targetNode, target string) *corev1.Pod
 			NodeSelector:       map[string]string{"kubernetes.io/hostname": targetNode},
 			RestartPolicy:      corev1.RestartPolicyNever,
 			Containers: []corev1.Container{{
-				Name:    "workload",
-				Image:   "busybox:1.36",
-				Command: []string{"sh", "-c", fmt.Sprintf("wget -T 10 -O /dev/null http://%s/ 2>&1; sleep 3600", target)},
+				Name:  "workload",
+				Image: "busybox:1.36",
+				Command: []string{"sh", "-c", fmt.Sprintf(
+					"wget -T 20 -O /dev/null http://%s/ 2>&1; echo %s$?; sleep 3600",
+					target, exitMarkerPrefix,
+				)},
 			}},
 		},
 	}
+}
+
+func connectionFailed(workloadLog string) (failed, known bool) {
+	idx := strings.LastIndex(workloadLog, exitMarkerPrefix)
+	if idx == -1 {
+		return false, false
+	}
+	rest := workloadLog[idx+len(exitMarkerPrefix):]
+	end := strings.IndexByte(rest, '\n')
+	if end != -1 {
+		rest = rest[:end]
+	}
+	rest = strings.TrimSpace(rest)
+	code, err := strconv.Atoi(rest)
+	if err != nil {
+		return false, false
+	}
+	return code != 0, true
 }
 
 func startPodIPWatch(ctx context.Context, cs *kubernetes.Clientset, ns, runID string) (watch.Interface, error) {
@@ -247,6 +302,7 @@ func collectPodIPs(ctx context.Context, w watch.Interface, podNames []string, wi
 // proxy available without shelling into the node.
 func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS, ztunnelLabel string, podNames []string, createdAt, patchTimes map[string]time.Time) []report.PodEvent {
 	ztunnelLogs := fetchZtunnelLogs(ctx, cs, ztunnelNS, ztunnelLabel)
+	workloadLogs := fetchWorkloadLogs(ctx, cs, ns, podNames)
 
 	events := make([]report.PodEvent, 0, len(podNames))
 	for _, name := range podNames {
@@ -268,13 +324,16 @@ func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS
 			}
 		}
 		routingDelay, routingDelayKnown := ztlog.RoutingDelay(ztunnelLogs, name, ns)
+		connFailed, connFailedKnown := connectionFailed(workloadLogs[name])
 		events = append(events, report.PodEvent{
-			Name:              name,
-			IPAssignedAt:      created,
-			IPPatchedAtAPI:    patchedAt,
-			ZtunnelTimeout:    timedOut,
-			RoutingDelay:      routingDelay,
-			RoutingDelayKnown: routingDelayKnown,
+			Name:                  name,
+			IPAssignedAt:          created,
+			IPPatchedAtAPI:        patchedAt,
+			ZtunnelTimeout:        timedOut,
+			RoutingDelay:          routingDelay,
+			RoutingDelayKnown:     routingDelayKnown,
+			ConnectionFailed:      connFailed,
+			ConnectionFailedKnown: connFailedKnown,
 		})
 	}
 	return events
@@ -288,27 +347,58 @@ func fetchZtunnelLogs(ctx context.Context, cs *kubernetes.Clientset, ns, label s
 	}
 	var lines []string
 	for _, p := range pods.Items {
-		req := cs.CoreV1().Pods(ns).GetLogs(p.Name, &corev1.PodLogOptions{SinceSeconds: int64Ptr(300)})
-		stream, err := req.Stream(ctx)
+		body, err := readPodLog(ctx, cs, ns, p.Name, &corev1.PodLogOptions{SinceSeconds: int64Ptr(300)})
 		if err != nil {
 			log.Printf("stream logs for %s: %v", p.Name, err)
 			continue
 		}
-		buf := make([]byte, 0, 1<<20)
-		chunk := make([]byte, 32*1024)
-		for {
-			n, err := stream.Read(chunk)
-			if n > 0 {
-				buf = append(buf, chunk[:n]...)
-			}
-			if err != nil {
-				break
-			}
-		}
-		stream.Close()
-		lines = append(lines, splitLines(string(buf))...)
+		lines = append(lines, splitLines(body)...)
 	}
 	return lines
+}
+
+func fetchWorkloadLogs(ctx context.Context, cs *kubernetes.Clientset, ns string, podNames []string) map[string]string {
+	logs := make(map[string]string, len(podNames))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, name := range podNames {
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			body, err := readPodLog(ctx, cs, ns, name, &corev1.PodLogOptions{})
+			if err != nil {
+				log.Printf("stream logs for %s: %v", name, err)
+				return
+			}
+			mu.Lock()
+			logs[name] = body
+			mu.Unlock()
+		}(name)
+	}
+	wg.Wait()
+	return logs
+}
+
+func readPodLog(ctx context.Context, cs *kubernetes.Clientset, ns, podName string, opts *corev1.PodLogOptions) (string, error) {
+	req := cs.CoreV1().Pods(ns).GetLogs(podName, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	buf := make([]byte, 0, 4096)
+	chunk := make([]byte, 32*1024)
+	for {
+		n, err := stream.Read(chunk)
+		if n > 0 {
+			buf = append(buf, chunk[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return string(buf), nil
 }
 
 func splitLines(s string) []string {
@@ -354,6 +444,16 @@ func printSummary(rep report.Report) {
 	} else {
 		fmt.Printf("  routing delay:        unknown for all pods (set RUST_LOG=debug on ztunnel to capture it)\n")
 	}
+	if rep.ConnectionFailedKnownCount > 0 {
+		fmt.Printf("  connection failed (workload's own wget exit status, ground truth): %d/%d\n", rep.ConnectionFailedCount, rep.ConnectionFailedKnownCount)
+	} else {
+		fmt.Printf("  connection failed:    unknown for all pods (no wget exit marker found in any workload log)\n")
+	}
+	if rep.TimeoutVsFailureComparableCount > 0 {
+		matches := rep.FailedAndTimedOut + rep.OKNotTimedOut
+		fmt.Printf("  ztunnel timeout matches connection failure: %d/%d pods (failed+timeout=%d, failed+no-timeout=%d, ok+timeout=%d, ok+no-timeout=%d)\n",
+			matches, rep.TimeoutVsFailureComparableCount, rep.FailedAndTimedOut, rep.FailedNotTimedOut, rep.OKButTimedOut, rep.OKNotTimedOut)
+	}
 	fmt.Println()
 	for _, p := range rep.Pods {
 		flag := ""
@@ -364,6 +464,13 @@ func printSummary(rep report.Report) {
 		if p.RoutingDelayKnown {
 			routing = fmt.Sprintf("routing delay %s", p.RoutingDelay)
 		}
-		fmt.Printf("  %-40s patch=%-10s %s%s\n", p.Name, p.PatchLatency, routing, flag)
+		conn := "connection: unknown"
+		if p.ConnectionFailedKnown {
+			conn = "connection: ok"
+			if p.ConnectionFailed {
+				conn = "connection: FAILED"
+			}
+		}
+		fmt.Printf("  %-40s patch=%-10s %-24s %s%s\n", p.Name, p.PatchLatency, routing, conn, flag)
 	}
 }
