@@ -28,6 +28,16 @@ type PodEvent struct {
 	// Only meaningful when ConnectionFailedKnown is true.
 	ConnectionFailed      bool
 	ConnectionFailedKnown bool
+
+	// InitContainer* report the mitigation init container's own outcome —
+	// whether its probe loop found ztunnel ready or exhausted its retry
+	// budget — independent of whether the workload's own connection
+	// succeeded. Only meaningful when InitContainerOutcomeKnown is true
+	// (i.e. --init-container was used).
+	InitContainerOutcomeKnown bool
+	InitContainerReady        bool
+	InitContainerAttempts     int
+	InitContainerElapsed      time.Duration
 }
 
 // PodResult is one pod's computed latency alongside its raw event.
@@ -62,6 +72,14 @@ type Report struct {
 	FailedNotTimedOut               int
 	OKButTimedOut                   int
 	OKNotTimedOut                   int
+
+	// InitContainer* are aggregated only over pods with
+	// InitContainerOutcomeKnown — see PodEvent.InitContainerOutcomeKnown.
+	InitContainerKnownCount     int
+	InitContainerReadyCount     int
+	InitContainerExhaustedCount int
+	MeanInitContainerElapsed    time.Duration
+	MaxInitContainerElapsed     time.Duration
 }
 
 // Compute derives per-pod latencies and aggregate statistics from a set of
@@ -76,6 +94,8 @@ func Compute(events []PodEvent) Report {
 	latencies := make([]time.Duration, len(events))
 	var routingTotal time.Duration
 	var routingDelays []time.Duration
+	var initElapsedTotal time.Duration
+	var initElapsed []time.Duration
 	for i, e := range events {
 		latency := e.IPPatchedAtAPI.Sub(e.IPAssignedAt)
 		r.Pods[i] = PodResult{PodEvent: e, PatchLatency: latency}
@@ -107,6 +127,16 @@ func Compute(events []PodEvent) Report {
 				r.OKNotTimedOut++
 			}
 		}
+		if e.InitContainerOutcomeKnown {
+			r.InitContainerKnownCount++
+			if e.InitContainerReady {
+				r.InitContainerReadyCount++
+			} else {
+				r.InitContainerExhaustedCount++
+			}
+			initElapsedTotal += e.InitContainerElapsed
+			initElapsed = append(initElapsed, e.InitContainerElapsed)
+		}
 	}
 
 	slices.Sort(latencies)
@@ -115,6 +145,11 @@ func Compute(events []PodEvent) Report {
 		r.RoutingDelayCount = len(routingDelays)
 		r.MeanRoutingDelay = routingTotal / time.Duration(len(routingDelays))
 		r.MaxRoutingDelay = routingDelays[len(routingDelays)-1]
+	}
+	if len(initElapsed) > 0 {
+		slices.Sort(initElapsed)
+		r.MeanInitContainerElapsed = initElapsedTotal / time.Duration(len(initElapsed))
+		r.MaxInitContainerElapsed = initElapsed[len(initElapsed)-1]
 	}
 
 	r.Count = len(events)

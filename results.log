@@ -1,0 +1,360 @@
+====================================================================================================================================================
+INIT CONTAINER: NONE
+====================================================================================================================================================
+
+☸ ztunnel-diag (default) in ztunnel-diag on  main [!] via 🐹 v1.25.5
+❯ go run ./cmd/ztunnel-diag
+2026/08/24 10:02:40 resolved target echo-target.ztunnel-diag.svc.cluster.local:8080 to ClusterIP 10.110.234.18:8080, bypassing DNS
+2026/08/24 10:03:11 waiting 30s for in-flight connections to settle before scraping ztunnel logs
+ztunnel-diag report
+  pods observed:        100
+  ztunnel timeouts:     65
+  mean patch latency:   25.675553773s
+  p95 patch latency:    27.890792417s
+  max patch latency:    30.703226333s
+  routing delay (ztunnel's actual wait-for-workload-to-connection-opened time, 35/100 pods, requires RUST_LOG=debug):
+    mean: 3.0532856s   max: 4.978843s
+  connection failed (workload's own wget exit status, ground truth): 65/100
+  ztunnel timeout matches connection failure: 100/100 pods (failed+timeout=65, failed+no-timeout=0, ok+timeout=0, ok+no-timeout=35)
+
+  ztunnel-diag-1787580160697125000-0       patch=27.677484s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-1       patch=27.660941875s routing delay 3.182636s  connection: ok
+  ztunnel-diag-1787580160697125000-2       patch=25.517660541s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-3       patch=26.058784292s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-4       patch=25.58299925s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-5       patch=26.115424709s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-6       patch=26.767215041s routing delay 2.724005s  connection: ok
+  ztunnel-diag-1787580160697125000-7       patch=25.831608417s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-8       patch=27.313638417s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-9       patch=27.790354042s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-10      patch=25.882202416s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-11      patch=27.882189125s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-12      patch=26.17057525s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-13      patch=27.066940333s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-14      patch=17.182081417s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-15      patch=26.806432459s routing delay 4.071081s  connection: ok
+  ztunnel-diag-1787580160697125000-16      patch=18.361194666s routing delay 1.213427s  connection: ok
+  ztunnel-diag-1787580160697125000-17      patch=18.6733435s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-18      patch=26.165469333s routing delay 3.140273s  connection: ok
+  ztunnel-diag-1787580160697125000-19      patch=27.121128708s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-20      patch=17.395269792s routing delay 965.834ms  connection: ok
+  ztunnel-diag-1787580160697125000-21      patch=25.691774042s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-22      patch=17.984403084s routing delay 4.621688s  connection: ok
+  ztunnel-diag-1787580160697125000-23      patch=26.5901625s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-24      patch=27.890792417s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-25      patch=25.296471916s routing delay 4.978843s  connection: ok
+  ztunnel-diag-1787580160697125000-26      patch=27.0679325s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-27      patch=25.186725417s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-28      patch=27.548306542s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-29      patch=27.750279375s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-30      patch=26.995259208s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-31      patch=26.457726166s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-32      patch=18.104991625s routing delay 1.842014s  connection: ok
+  ztunnel-diag-1787580160697125000-33      patch=26.707320917s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-34      patch=30.703226333s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-35      patch=27.598837291s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-36      patch=26.146077791s routing delay 3.196889s  connection: ok
+  ztunnel-diag-1787580160697125000-37      patch=25.669536416s routing delay 4.28036s   connection: ok
+  ztunnel-diag-1787580160697125000-38      patch=26.551133125s routing delay 3.262894s  connection: ok
+  ztunnel-diag-1787580160697125000-39      patch=26.260973833s routing delay 2.753749s  connection: ok
+  ztunnel-diag-1787580160697125000-40      patch=28.577574625s routing delay 3.513788s  connection: ok
+  ztunnel-diag-1787580160697125000-41      patch=27.37073575s routing delay 2.796953s  connection: ok
+  ztunnel-diag-1787580160697125000-42      patch=27.057233167s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-43      patch=27.037913666s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-44      patch=27.773536375s routing delay 4.235525s  connection: ok
+  ztunnel-diag-1787580160697125000-45      patch=26.392186209s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-46      patch=22.574033667s routing delay 681.897ms  connection: ok
+  ztunnel-diag-1787580160697125000-47      patch=26.024158417s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-48      patch=26.863342292s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-49      patch=25.776484208s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-50      patch=27.213442209s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-51      patch=26.263135583s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-52      patch=25.783417625s routing delay 2.731027s  connection: ok
+  ztunnel-diag-1787580160697125000-53      patch=27.223563792s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-54      patch=17.682116417s routing delay 1.252593s  connection: ok
+  ztunnel-diag-1787580160697125000-55      patch=22.807727s routing delay 893.066ms  connection: ok
+  ztunnel-diag-1787580160697125000-56      patch=27.724968292s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-57      patch=27.254879584s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-58      patch=27.393814791s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-59      patch=26.390866583s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-60      patch=26.034294041s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-61      patch=25.210382167s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-62      patch=27.14047475s routing delay 4.776549s  connection: ok
+  ztunnel-diag-1787580160697125000-63      patch=26.891128s routing delay 4.765296s  connection: ok
+  ztunnel-diag-1787580160697125000-64      patch=25.451398375s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-65      patch=17.24733075s routing delay 1.299018s  connection: ok
+  ztunnel-diag-1787580160697125000-66      patch=26.167338875s routing delay 2.889198s  connection: ok
+  ztunnel-diag-1787580160697125000-67      patch=26.358123917s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-68      patch=26.581421583s routing delay 4.294464s  connection: ok
+  ztunnel-diag-1787580160697125000-69      patch=27.15276675s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-70      patch=17.825663458s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-71      patch=27.169653583s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-72      patch=25.40137725s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-73      patch=27.462876334s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-74      patch=17.583775959s routing delay 2.406765s  connection: ok
+  ztunnel-diag-1787580160697125000-75      patch=27.266996708s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-76      patch=22.70323275s routing delay 918.798ms  connection: ok
+  ztunnel-diag-1787580160697125000-77      patch=27.744208875s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-78      patch=26.943359041s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-79      patch=27.942536875s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-80      patch=26.523564792s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-81      patch=26.65897225s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-82      patch=25.620767209s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-83      patch=25.082166792s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-84      patch=27.631672917s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-85      patch=26.552604541s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-86      patch=27.545436625s routing delay 3.470732s  connection: ok
+  ztunnel-diag-1787580160697125000-87      patch=26.914463959s routing delay 3.180212s  connection: ok
+  ztunnel-diag-1787580160697125000-88      patch=25.901797416s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-89      patch=26.999717166s routing delay 3.958321s  connection: ok
+  ztunnel-diag-1787580160697125000-90      patch=25.252865s routing delay 4.392499s  connection: ok
+  ztunnel-diag-1787580160697125000-91      patch=26.493706583s routing delay 2.724535s  connection: ok
+  ztunnel-diag-1787580160697125000-92      patch=27.830005834s routing delay 3.356672s  connection: ok
+  ztunnel-diag-1787580160697125000-93      patch=25.977427833s routing delay 4.908081s  connection: ok
+  ztunnel-diag-1787580160697125000-94      patch=26.7685625s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-95      patch=30.610047375s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-96      patch=26.830526958s routing delay 3.185314s  connection: ok
+  ztunnel-diag-1787580160697125000-97      patch=25.98288075s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-98      patch=27.106363625s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+  ztunnel-diag-1787580160697125000-99      patch=18.583488875s routing delay unknown    connection: FAILED  <-- ztunnel timeout
+
+====================================================================================================================================================
+INIT CONTAINER: NO-OP
+====================================================================================================================================================
+
+☸ ztunnel-diag (default) in ztunnel-diag on  main [!] via 🐹 v1.25.5 took 1m12s
+❯ go run ./cmd/ztunnel-diag --init-container-mode=noop
+2026/08/24 10:06:22 resolved target echo-target.ztunnel-diag.svc.cluster.local:8080 to ClusterIP 10.110.234.18:8080, bypassing DNS
+2026/08/24 10:07:04 waiting 30s for in-flight connections to settle before scraping ztunnel logs
+ztunnel-diag report
+  pods observed:        100
+  ztunnel timeouts:     0
+  mean patch latency:   34.04430357s
+  p95 patch latency:    41.664145833s
+  max patch latency:    42.33630225s
+  routing delay (ztunnel's actual wait-for-workload-to-connection-opened time, 100/100 pods, requires RUST_LOG=debug):
+    mean: 316.86807ms   max: 3.652344s
+  connection failed (workload's own wget exit status, ground truth): 0/100
+  ztunnel timeout matches connection failure: 100/100 pods (failed+timeout=0, failed+no-timeout=0, ok+timeout=0, ok+no-timeout=100)
+
+  ztunnel-diag-1787580382081306000-0       patch=38.969984209s routing delay 300.675ms  connection: ok
+  ztunnel-diag-1787580382081306000-1       patch=37.441123292s routing delay 27µs       connection: ok
+  ztunnel-diag-1787580382081306000-2       patch=38.507828583s routing delay 27µs       connection: ok
+  ztunnel-diag-1787580382081306000-3       patch=37.176110584s routing delay 32.322ms   connection: ok
+  ztunnel-diag-1787580382081306000-4       patch=41.333643292s routing delay 1.693363s  connection: ok
+  ztunnel-diag-1787580382081306000-5       patch=29.900428416s routing delay 21µs       connection: ok
+  ztunnel-diag-1787580382081306000-6       patch=26.437215167s routing delay 49µs       connection: ok
+  ztunnel-diag-1787580382081306000-7       patch=30.735529875s routing delay 26µs       connection: ok
+  ztunnel-diag-1787580382081306000-8       patch=30.198636s routing delay 39µs       connection: ok
+  ztunnel-diag-1787580382081306000-9       patch=28.138058875s routing delay 29µs       connection: ok
+  ztunnel-diag-1787580382081306000-10      patch=30.830926667s routing delay 24µs       connection: ok
+  ztunnel-diag-1787580382081306000-11      patch=37.536909875s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-12      patch=27.83494925s routing delay 39µs       connection: ok
+  ztunnel-diag-1787580382081306000-13      patch=30.298772292s routing delay 19µs       connection: ok
+  ztunnel-diag-1787580382081306000-14      patch=28.830626833s routing delay 24µs       connection: ok
+  ztunnel-diag-1787580382081306000-15      patch=29.738092375s routing delay 21µs       connection: ok
+  ztunnel-diag-1787580382081306000-16      patch=39.802994209s routing delay 765.687ms  connection: ok
+  ztunnel-diag-1787580382081306000-17      patch=33.51384525s routing delay 39µs       connection: ok
+  ztunnel-diag-1787580382081306000-18      patch=29.646882541s routing delay 19µs       connection: ok
+  ztunnel-diag-1787580382081306000-19      patch=29.06114425s routing delay 25µs       connection: ok
+  ztunnel-diag-1787580382081306000-20      patch=29.313362792s routing delay 2.077ms    connection: ok
+  ztunnel-diag-1787580382081306000-21      patch=30.020907417s routing delay 29µs       connection: ok
+  ztunnel-diag-1787580382081306000-22      patch=26.579058458s routing delay 39µs       connection: ok
+  ztunnel-diag-1787580382081306000-23      patch=30.377437917s routing delay 26µs       connection: ok
+  ztunnel-diag-1787580382081306000-24      patch=22.623268791s routing delay 19µs       connection: ok
+  ztunnel-diag-1787580382081306000-25      patch=40.426015666s routing delay 697.617ms  connection: ok
+  ztunnel-diag-1787580382081306000-26      patch=27.755633958s routing delay 22µs       connection: ok
+  ztunnel-diag-1787580382081306000-27      patch=39.352870292s routing delay 41µs       connection: ok
+  ztunnel-diag-1787580382081306000-28      patch=29.819312084s routing delay 27µs       connection: ok
+  ztunnel-diag-1787580382081306000-29      patch=22.760313916s routing delay 46µs       connection: ok
+  ztunnel-diag-1787580382081306000-30      patch=28.240562375s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-31      patch=39.034263333s routing delay 41µs       connection: ok
+  ztunnel-diag-1787580382081306000-32      patch=30.468932625s routing delay 25µs       connection: ok
+  ztunnel-diag-1787580382081306000-33      patch=30.770148666s routing delay 9µs        connection: ok
+  ztunnel-diag-1787580382081306000-34      patch=24.848033666s routing delay 32µs       connection: ok
+  ztunnel-diag-1787580382081306000-35      patch=27.672344s routing delay 118µs      connection: ok
+  ztunnel-diag-1787580382081306000-36      patch=37.552473459s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-37      patch=29.979266541s routing delay 28µs       connection: ok
+  ztunnel-diag-1787580382081306000-38      patch=34.239451333s routing delay 25µs       connection: ok
+  ztunnel-diag-1787580382081306000-39      patch=41.713726208s routing delay 3.652344s  connection: ok
+  ztunnel-diag-1787580382081306000-40      patch=41.664145833s routing delay 2.062759s  connection: ok
+  ztunnel-diag-1787580382081306000-41      patch=36.641580125s routing delay 52µs       connection: ok
+  ztunnel-diag-1787580382081306000-42      patch=41.252489458s routing delay 1.35425s   connection: ok
+  ztunnel-diag-1787580382081306000-43      patch=40.274198833s routing delay 2.422641s  connection: ok
+  ztunnel-diag-1787580382081306000-44      patch=37.038810833s routing delay 24µs       connection: ok
+  ztunnel-diag-1787580382081306000-45      patch=29.48420775s routing delay 41µs       connection: ok
+  ztunnel-diag-1787580382081306000-46      patch=29.430559s routing delay 43µs       connection: ok
+  ztunnel-diag-1787580382081306000-47      patch=37.426946958s routing delay 40µs       connection: ok
+  ztunnel-diag-1787580382081306000-48      patch=29.547303208s routing delay 25µs       connection: ok
+  ztunnel-diag-1787580382081306000-49      patch=29.762821541s routing delay 40µs       connection: ok
+  ztunnel-diag-1787580382081306000-50      patch=29.48083525s routing delay 44µs       connection: ok
+  ztunnel-diag-1787580382081306000-51      patch=41.705438s routing delay 1.210571s  connection: ok
+  ztunnel-diag-1787580382081306000-52      patch=39.948688167s routing delay 265.373ms  connection: ok
+  ztunnel-diag-1787580382081306000-53      patch=26.970115375s routing delay 26µs       connection: ok
+  ztunnel-diag-1787580382081306000-54      patch=30.645499875s routing delay 17µs       connection: ok
+  ztunnel-diag-1787580382081306000-55      patch=34.794058166s routing delay 40µs       connection: ok
+  ztunnel-diag-1787580382081306000-56      patch=38.83783725s routing delay 56µs       connection: ok
+  ztunnel-diag-1787580382081306000-57      patch=38.006457375s routing delay 35µs       connection: ok
+  ztunnel-diag-1787580382081306000-58      patch=33.734984042s routing delay 44µs       connection: ok
+  ztunnel-diag-1787580382081306000-59      patch=35.489080166s routing delay 25µs       connection: ok
+  ztunnel-diag-1787580382081306000-60      patch=35.87428625s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-61      patch=35.949099209s routing delay 37µs       connection: ok
+  ztunnel-diag-1787580382081306000-62      patch=30.572079542s routing delay 14µs       connection: ok
+  ztunnel-diag-1787580382081306000-63      patch=29.566860542s routing delay 40µs       connection: ok
+  ztunnel-diag-1787580382081306000-64      patch=34.879725375s routing delay 24µs       connection: ok
+  ztunnel-diag-1787580382081306000-65      patch=33.845072542s routing delay 40µs       connection: ok
+  ztunnel-diag-1787580382081306000-66      patch=42.33630225s routing delay 1.202706s  connection: ok
+  ztunnel-diag-1787580382081306000-67      patch=36.932987125s routing delay 41µs       connection: ok
+  ztunnel-diag-1787580382081306000-68      patch=41.574043666s routing delay 1.615887s  connection: ok
+  ztunnel-diag-1787580382081306000-69      patch=39.332486875s routing delay 26µs       connection: ok
+  ztunnel-diag-1787580382081306000-70      patch=35.24461325s routing delay 24µs       connection: ok
+  ztunnel-diag-1787580382081306000-71      patch=33.654060292s routing delay 40µs       connection: ok
+  ztunnel-diag-1787580382081306000-72      patch=37.629204542s routing delay 38µs       connection: ok
+  ztunnel-diag-1787580382081306000-73      patch=37.447633125s routing delay 24µs       connection: ok
+  ztunnel-diag-1787580382081306000-74      patch=36.795960041s routing delay 978.463ms  connection: ok
+  ztunnel-diag-1787580382081306000-75      patch=28.854652167s routing delay 27µs       connection: ok
+  ztunnel-diag-1787580382081306000-76      patch=38.174765708s routing delay 25µs       connection: ok
+  ztunnel-diag-1787580382081306000-77      patch=27.324689209s routing delay 82µs       connection: ok
+  ztunnel-diag-1787580382081306000-78      patch=29.623569417s routing delay 26µs       connection: ok
+  ztunnel-diag-1787580382081306000-79      patch=41.556841041s routing delay 1.809733s  connection: ok
+  ztunnel-diag-1787580382081306000-80      patch=28.414075042s routing delay 29µs       connection: ok
+  ztunnel-diag-1787580382081306000-81      patch=28.581451041s routing delay 36µs       connection: ok
+  ztunnel-diag-1787580382081306000-82      patch=29.856190333s routing delay 49µs       connection: ok
+  ztunnel-diag-1787580382081306000-83      patch=30.418249167s routing delay 33µs       connection: ok
+  ztunnel-diag-1787580382081306000-84      patch=41.868878625s routing delay 1.682247s  connection: ok
+  ztunnel-diag-1787580382081306000-85      patch=40.105310458s routing delay 2.408931s  connection: ok
+  ztunnel-diag-1787580382081306000-86      patch=40.751910458s routing delay 1.418983s  connection: ok
+  ztunnel-diag-1787580382081306000-87      patch=41.095449458s routing delay 483.284ms  connection: ok
+  ztunnel-diag-1787580382081306000-88      patch=36.244586291s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-89      patch=38.381735625s routing delay 62µs       connection: ok
+  ztunnel-diag-1787580382081306000-90      patch=40.911728708s routing delay 1.290882s  connection: ok
+  ztunnel-diag-1787580382081306000-91      patch=36.019333s routing delay 26µs       connection: ok
+  ztunnel-diag-1787580382081306000-92      patch=33.654640959s routing delay 20µs       connection: ok
+  ztunnel-diag-1787580382081306000-93      patch=35.090424375s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-94      patch=31.573230209s routing delay 41µs       connection: ok
+  ztunnel-diag-1787580382081306000-95      patch=41.447289916s routing delay 2.561403s  connection: ok
+  ztunnel-diag-1787580382081306000-96      patch=37.129439125s routing delay 28µs       connection: ok
+  ztunnel-diag-1787580382081306000-97      patch=40.728019833s routing delay 1.772083s  connection: ok
+  ztunnel-diag-1787580382081306000-98      patch=34.018792875s routing delay 23µs       connection: ok
+  ztunnel-diag-1787580382081306000-99      patch=29.353546875s routing delay 26µs       connection: ok
+
+====================================================================================================================================================
+INIT CONTAINER: PROBE
+====================================================================================================================================================
+
+☸ ztunnel-diag (default) in ztunnel-diag on  main [!] via 🐹 v1.25.5 took 1m6s
+❯ go run ./cmd/ztunnel-diag --init-container-mode=probe
+2026/08/24 10:04:50 resolved target echo-target.ztunnel-diag.svc.cluster.local:8080 to ClusterIP 10.110.234.18:8080, bypassing DNS
+2026/08/24 10:05:29 waiting 30s for in-flight connections to settle before scraping ztunnel logs
+ztunnel-diag report
+  pods observed:        100
+  ztunnel timeouts:     61
+  mean patch latency:   30.221988535s
+  p95 patch latency:    36.421103792s
+  max patch latency:    39.09460075s
+  routing delay (ztunnel's actual wait-for-workload-to-connection-opened time, 100/100 pods, requires RUST_LOG=debug):
+    mean: 15.62334643s   max: 26.371688s
+  connection failed (workload's own wget exit status, ground truth): 0/100
+  ztunnel timeout matches connection failure: 39/100 pods (failed+timeout=0, failed+no-timeout=0, ok+timeout=61, ok+no-timeout=39)
+  init container outcome: 100/100 ready, 0/100 exhausted their retry budget (mean 6.96s, max 17s to ready/exhausted)
+
+  ztunnel-diag-1787580290484346000-0       patch=33.316596958s routing delay 12.379023s connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-1       patch=23.547612083s routing delay 9.423198s  connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-2       patch=27.80642275s routing delay 13.193247s connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-3       patch=36.091593208s routing delay 18.818777s connection: ok init=ready(3,11s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-4       patch=30.25843625s routing delay 15.428254s connection: ok init=ready(2,5s)
+  ztunnel-diag-1787580290484346000-5       patch=32.377571833s routing delay 21.328133s connection: ok init=ready(3,10s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-6       patch=29.381251166s routing delay 12.462475s connection: ok init=ready(2,4s)
+  ztunnel-diag-1787580290484346000-7       patch=31.821880291s routing delay 21.184469s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-8       patch=29.018758542s routing delay 16.755195s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-9       patch=38.300567375s routing delay 17.678449s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-10      patch=35.057848375s routing delay 14.637319s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-11      patch=28.522898417s routing delay 15.752548s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-12      patch=35.778571958s routing delay 17.16219s  connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-13      patch=34.253068042s routing delay 19.801311s connection: ok init=ready(3,11s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-14      patch=29.505311042s routing delay 13.22777s  connection: ok init=ready(1,3s)
+  ztunnel-diag-1787580290484346000-15      patch=31.645687333s routing delay 20.790865s connection: ok init=ready(3,11s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-16      patch=35.397446417s routing delay 16.15775s  connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-17      patch=31.522775834s routing delay 10.510765s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-18      patch=32.811951958s routing delay 17.504166s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-19      patch=33.511988583s routing delay 10.892262s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-20      patch=31.946653416s routing delay 15.58792s  connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-21      patch=28.781499167s routing delay 18.932002s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-22      patch=34.95543325s routing delay 21.301605s connection: ok init=ready(3,13s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-23      patch=30.068727875s routing delay 19.694057s connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-24      patch=23.583109792s routing delay 14.31268s  connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-25      patch=31.665534292s routing delay 20.509974s connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-26      patch=28.758904625s routing delay 17.744359s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-27      patch=23.634411792s routing delay 11.443461s connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-28      patch=28.891380708s routing delay 20.229548s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-29      patch=28.088221542s routing delay 15.286825s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-30      patch=29.4830855s routing delay 12.561376s connection: ok init=ready(1,3s)
+  ztunnel-diag-1787580290484346000-31      patch=29.590922417s routing delay 14.5624s   connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-32      patch=28.383212959s routing delay 12.403217s connection: ok init=ready(1,1s)
+  ztunnel-diag-1787580290484346000-33      patch=33.777942333s routing delay 13.346534s connection: ok init=ready(3,10s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-34      patch=29.648311667s routing delay 12.664138s connection: ok init=ready(1,3s)
+  ztunnel-diag-1787580290484346000-35      patch=36.473148208s routing delay 17.269396s connection: ok init=ready(3,11s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-36      patch=25.050144417s routing delay 14.340976s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-37      patch=23.868643s routing delay 11.140882s connection: ok init=ready(2,4s)
+  ztunnel-diag-1787580290484346000-38      patch=29.669913709s routing delay 18.502188s connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-39      patch=34.022836667s routing delay 20.610311s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-40      patch=32.341379083s routing delay 20.874043s connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-41      patch=23.809898208s routing delay 9.964533s  connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-42      patch=24.749230292s routing delay 11.523491s connection: ok init=ready(2,5s)
+  ztunnel-diag-1787580290484346000-43      patch=32.612691417s routing delay 15.415464s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-44      patch=30.258246458s routing delay 16.774324s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-45      patch=37.091845417s routing delay 18.583969s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-46      patch=29.638344583s routing delay 13.937117s connection: ok init=ready(1,3s)
+  ztunnel-diag-1787580290484346000-47      patch=27.576078667s routing delay 12.243301s connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-48      patch=30.092629167s routing delay 12.832448s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-49      patch=31.845458583s routing delay 20.137058s connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-50      patch=29.117596417s routing delay 14.595859s connection: ok init=ready(1,1s)
+  ztunnel-diag-1787580290484346000-51      patch=31.79680975s routing delay 26.146148s connection: ok init=ready(4,16s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-52      patch=29.583046875s routing delay 19.350897s connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-53      patch=30.3002545s routing delay 10.367069s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-54      patch=29.767466042s routing delay 16.024334s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-55      patch=32.637841667s routing delay 15.766315s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-56      patch=28.268426291s routing delay 13.902855s connection: ok init=ready(1,3s)
+  ztunnel-diag-1787580290484346000-57      patch=33.438740459s routing delay 9.596364s  connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-58      patch=23.498853583s routing delay 13.618565s connection: ok init=ready(2,5s)
+  ztunnel-diag-1787580290484346000-59      patch=29.701275041s routing delay 26.371688s connection: ok init=ready(4,17s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-60      patch=28.459685208s routing delay 12.774466s connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-61      patch=30.1341735s routing delay 9.209533s  connection: ok init=ready(2,5s)
+  ztunnel-diag-1787580290484346000-62      patch=34.315778417s routing delay 8.754804s  connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-63      patch=34.859763042s routing delay 20.635774s connection: ok init=ready(3,13s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-64      patch=31.908444291s routing delay 8.307961s  connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-65      patch=30.238163583s routing delay 20.230122s connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-66      patch=39.09460075s routing delay 18.149386s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-67      patch=28.004293709s routing delay 11.748261s connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-68      patch=23.397085167s routing delay 12.823122s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-69      patch=23.568990625s routing delay 18.972373s connection: ok init=ready(3,10s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-70      patch=31.108281s routing delay 15.736725s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-71      patch=34.531731916s routing delay 19.205543s connection: ok init=ready(3,11s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-72      patch=29.509279375s routing delay 22.850769s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-73      patch=28.823329833s routing delay 12.771016s connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-74      patch=24.074248708s routing delay 18.107443s connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-75      patch=32.889737416s routing delay 23.34436s  connection: ok init=ready(3,13s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-76      patch=35.226668917s routing delay 21.094256s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-77      patch=29.574423125s routing delay 13.337579s connection: ok init=ready(1,3s)
+  ztunnel-diag-1787580290484346000-78      patch=33.003090459s routing delay 16.609998s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-79      patch=30.466111583s routing delay 20.556904s connection: ok init=ready(2,9s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-80      patch=28.150116125s routing delay 11.253685s connection: ok init=ready(1,1s)
+  ztunnel-diag-1787580290484346000-81      patch=31.880280542s routing delay 18.853714s connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-82      patch=30.719021125s routing delay 16.362365s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-83      patch=29.914886833s routing delay 16.639336s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-84      patch=32.297784417s routing delay 10.968047s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-85      patch=28.203895042s routing delay 16.202774s connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-86      patch=36.421103792s routing delay 20.012406s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-87      patch=24.542917125s routing delay 8.888249s  connection: ok init=ready(2,4s)
+  ztunnel-diag-1787580290484346000-88      patch=30.008201042s routing delay 17.254653s connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-89      patch=35.563407333s routing delay 16.728777s connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-90      patch=23.375806417s routing delay 9.092882s  connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-91      patch=23.021100292s routing delay 9.932348s  connection: ok init=ready(1,2s)
+  ztunnel-diag-1787580290484346000-92      patch=29.961837625s routing delay 22.353645s connection: ok init=ready(3,12s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-93      patch=24.897897875s routing delay 12.16631s  connection: ok init=ready(2,8s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-94      patch=24.244057375s routing delay 7.473295s  connection: ok init=ready(2,4s)
+  ztunnel-diag-1787580290484346000-95      patch=31.294846833s routing delay 15.964269s connection: ok init=ready(2,6s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-96      patch=27.676308125s routing delay 12.071965s connection: ok init=ready(1,1s)
+  ztunnel-diag-1787580290484346000-97      patch=34.1623925s routing delay 9.631212s  connection: ok init=ready(2,7s)  <-- ztunnel timeout
+  ztunnel-diag-1787580290484346000-98      patch=29.939931334s routing delay 15.99785s  connection: ok init=ready(2,6s)
+  ztunnel-diag-1787580290484346000-99      patch=24.338792875s routing delay 13.708609s connection: ok init=ready(2,6s)

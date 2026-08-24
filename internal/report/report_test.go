@@ -146,6 +146,37 @@ func TestComputeConnectionFailedCountOnlyOverKnownPods(t *testing.T) {
 	}
 }
 
+func TestComputeInitContainerOutcomeOnlyOverKnownPods(t *testing.T) {
+	// A pod's workload succeeding or failing doesn't say whether the
+	// mitigation init container got there early or rode its retry budget to
+	// exhaustion — that's a separate signal, only present when
+	// --init-container was used (InitContainerOutcomeKnown false otherwise).
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	events := []PodEvent{
+		{Name: "a", IPAssignedAt: base, IPPatchedAtAPI: base, InitContainerOutcomeKnown: true, InitContainerReady: true, InitContainerElapsed: 3 * time.Second},
+		{Name: "b", IPAssignedAt: base, IPPatchedAtAPI: base, InitContainerOutcomeKnown: true, InitContainerReady: false, InitContainerElapsed: 29 * time.Second},
+		{Name: "c", IPAssignedAt: base, IPPatchedAtAPI: base, InitContainerOutcomeKnown: false},
+	}
+
+	got := Compute(events)
+
+	if got.InitContainerKnownCount != 2 {
+		t.Errorf("InitContainerKnownCount = %d, want 2", got.InitContainerKnownCount)
+	}
+	if got.InitContainerReadyCount != 1 {
+		t.Errorf("InitContainerReadyCount = %d, want 1", got.InitContainerReadyCount)
+	}
+	if got.InitContainerExhaustedCount != 1 {
+		t.Errorf("InitContainerExhaustedCount = %d, want 1", got.InitContainerExhaustedCount)
+	}
+	if want := 16 * time.Second; got.MeanInitContainerElapsed != want {
+		t.Errorf("MeanInitContainerElapsed = %v, want %v", got.MeanInitContainerElapsed, want)
+	}
+	if want := 29 * time.Second; got.MaxInitContainerElapsed != want {
+		t.Errorf("MaxInitContainerElapsed = %v, want %v", got.MaxInitContainerElapsed, want)
+	}
+}
+
 func TestComputeTimeoutVsFailureBreakdown(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	events := []PodEvent{

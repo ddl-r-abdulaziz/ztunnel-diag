@@ -19,6 +19,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"ztunnel-diag/internal/report"
@@ -26,7 +27,7 @@ import (
 )
 
 func main() {
-	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "path to kubeconfig (defaults to $KUBECONFIG, then in-cluster config)")
+	kubeconfig := flag.String("kubeconfig", "", "path to kubeconfig (defaults to $KUBECONFIG, then ~/.kube/config, then in-cluster config)")
 	namespace := flag.String("namespace", "ztunnel-diag", "namespace to burst pods into (created if missing)")
 	count := flag.Int("count", 100, "number of pods to create simultaneously (stay under the target node's pod capacity minus already-running system pods, e.g. minikube's default kubelet max-pods=110, or excess pods sit permanently Pending and pollute the report as if they were slow to patch)")
 	targetNode := flag.String("target-node", "ztunnel-diag-m02", "node the burst pods are pinned to (by hostname) — the node being saturated")
@@ -38,6 +39,7 @@ func main() {
 	keep := flag.Bool("keep", false, "keep the burst pods around after the run instead of deleting them")
 	asJSON := flag.Bool("json", false, "print the raw report as JSON instead of a human summary")
 	hostLoadWorkers := flag.Int("host-load-workers", runtime.NumCPU(), "goroutines busy-looping on the host's real CPU for the duration of the burst+window+settle, to compete with minikube's Docker containers (istiod/ztunnel) for actual host scheduling time — an in-cluster CPU-hog pod only competes within the cluster's own CPU accounting and didn't move the needle. 0 disables this")
+	initContainerMode := flag.String("init-container-mode", initContainerModeNone, "mitigation init container to add to each burst pod: none | noop (bare exit 0, no logic — isolates whether adding any init container's own start overhead matters) | probe (retries a real HTTPS request to the k8s API server, via its injected env vars not DNS, until it gets a genuine HTTP response back)")
 	flag.Parse()
 
 	if *target == "" {
@@ -56,6 +58,16 @@ func main() {
 		log.Fatalf("ensuring namespace %s: %v", *namespace, err)
 	}
 
+	// ztunnel's own logs tag a connection by its dst.service (the original
+	// Service DNS name) regardless of whether the client resolved it via DNS
+	// or hit the ClusterIP directly — captured before resolution so
+	// buildPodEvents can tell the workload's real connection apart from a
+	// mitigation init container's own probe (see ztlog.RoutingDelay).
+	targetHost, _, err := net.SplitHostPort(*target)
+	if err != nil {
+		log.Fatalf("parsing --target %q: %v", *target, err)
+	}
+
 	resolvedTarget := resolveTargetToClusterIP(ctx, clientset, *namespace, *target)
 	if resolvedTarget != *target {
 		log.Printf("resolved target %s to ClusterIP %s, bypassing DNS", *target, resolvedTarget)
@@ -69,7 +81,7 @@ func main() {
 
 	stopHostLoad := startHostLoad(*hostLoadWorkers)
 
-	createdAt, podNames := createBurst(ctx, clientset, *namespace, runID, *count, *targetNode, *target)
+	createdAt, podNames := createBurst(ctx, clientset, *namespace, runID, *count, *targetNode, *target, *initContainerMode)
 	if !*keep {
 		defer deleteBurst(ctx, clientset, *namespace, podNames)
 	}
@@ -81,7 +93,7 @@ func main() {
 
 	stopHostLoad()
 
-	events := buildPodEvents(ctx, clientset, *namespace, *ztunnelNamespace, *ztunnelLabel, podNames, createdAt, patchTimes)
+	events := buildPodEvents(ctx, clientset, *namespace, *ztunnelNamespace, *ztunnelLabel, targetHost, podNames, createdAt, patchTimes, *initContainerMode)
 	rep := report.Compute(events)
 
 	if *asJSON {
@@ -113,8 +125,8 @@ func startHostLoad(n int) (stop func()) {
 	return func() { stopped.Store(true) }
 }
 
-func buildClientset(kubeconfig string) (*kubernetes.Clientset, error) {
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+func buildClientset(kubeconfigPath string) (*kubernetes.Clientset, error) {
+	cfg, err := buildRESTConfig(kubeconfigPath)
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +137,20 @@ func buildClientset(kubeconfig string) (*kubernetes.Clientset, error) {
 	cfg.QPS = 200
 	cfg.Burst = 400
 	return kubernetes.NewForConfig(cfg)
+}
+
+// buildRESTConfig resolves a kubeconfig the same way kubectl does: an
+// explicit kubeconfigPath wins, otherwise the KUBECONFIG env var, otherwise
+// ~/.kube/config. clientcmd.BuildConfigFromFlags does NOT do this fallback
+// chain on its own — passing it an empty path only tries in-cluster config,
+// so without KUBECONFIG explicitly exported this tool would fail to find a
+// perfectly good default ~/.kube/config.
+func buildRESTConfig(kubeconfigPath string) (*rest.Config, error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if kubeconfigPath != "" {
+		loadingRules.ExplicitPath = kubeconfigPath
+	}
+	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{}).ClientConfig()
 }
 
 // resolveTargetToClusterIP rewrites a "host:port" target given by k8s Service
@@ -163,7 +189,7 @@ func ensureNamespace(ctx context.Context, cs *kubernetes.Clientset, ns string) e
 
 // createBurst creates count pods concurrently so they hit the API server (and
 // the node's kubelet) as close to simultaneously as possible.
-func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string, count int, targetNode, target string) (map[string]time.Time, []string) {
+func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string, count int, targetNode, target, initContainerMode string) (map[string]time.Time, []string) {
 	names := make([]string, count)
 	createdAt := make([]time.Time, count)
 	var mu sync.Mutex
@@ -181,7 +207,7 @@ func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string
 				log.Printf("create serviceaccount %s: %v", sa, err)
 				return
 			}
-			pod := podSpec(name, runID, sa, targetNode, target)
+			pod := podSpec(name, runID, sa, targetNode, target, initContainerMode)
 			t := time.Now()
 			if _, err := cs.CoreV1().Pods(ns).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 				log.Printf("create pod %s: %v", name, err)
@@ -207,27 +233,92 @@ func createBurst(ctx context.Context, cs *kubernetes.Clientset, ns, runID string
 
 const exitMarkerPrefix = "ztunnel-diag-exit="
 
+// Init container modes for podSpec, controlled by --init-container-mode.
+// "noop" exists to isolate whether adding *any* init container (extra
+// container-start overhead under a saturated node) is doing the real work,
+// independent of the probe's own retry logic — see README.
+const (
+	initContainerModeNone  = "none"
+	initContainerModeNoop  = "noop"
+	initContainerModeProbe = "probe"
+)
+
+// initContainerRetries, initContainerProbeTimeout and
+// initContainerRetryInterval bound the mitigation init container's probe
+// loop (see podSpec): up to ~80s worst case. initContainerProbeTimeout (a
+// wget -T value, in seconds) is deliberately longer than ztunnel's 5s hold so
+// a single attempt can observe either a genuine forward (a real HTTP
+// response) or ztunnel's own wait-then-drop within that one attempt, rather
+// than always bailing out before either has resolved.
+const (
+	initContainerRetries       = 20
+	initContainerProbeTimeout  = "3"
+	initContainerRetryInterval = "1"
+)
+
+// initOutcomeMarkerPrefix tags the init container's own log with whether its
+// probe loop found ztunnel ready or exhausted its retry budget — the
+// workload's own exit code (see connectionFailed) says whether the real
+// connection succeeded, but not whether the mitigation got there early or
+// rode the retry budget all the way down.
+const initOutcomeMarkerPrefix = "ztunnel-diag-init-outcome="
+
 // podSpec builds the burst workload pod, pinned to targetNode (by hostname)
-// so the whole burst saturates one specific node.
-func podSpec(name, runID, serviceAccount, targetNode, target string) *corev1.Pod {
+// so the whole burst saturates one specific node. withInitContainer adds the
+// mitigation under test: an init container that retries a real HTTPS request
+// to the k8s API server (via its injected env vars, not DNS — see
+// resolveTargetToClusterIP for why DNS masks the thing being measured) until
+// it actually gets an HTTP response line back — proof ztunnel forwarded the
+// connection all the way to a real answer, not just that a local connect()
+// succeeded. ztunnel accepts a held connection's TCP handshake locally before
+// it knows whether to forward or drop it, so a bare connect-only check (e.g.
+// nc -z) reports success instantly regardless of whether identity has
+// landed; a plain byte round trip doesn't work either, since the API
+// server's TLS stack silently closes on malformed input instead of replying.
+// wget's "server returned error: HTTP/1.1 403 Forbidden" on an unauthorized
+// request is unambiguous proof of a genuine forward. Fails open (always
+// exits 0) so a pod that never gets there still starts.
+func podSpec(name, runID, serviceAccount, targetNode, target, initContainerMode string) *corev1.Pod {
+	spec := corev1.PodSpec{
+		ServiceAccountName: serviceAccount,
+		NodeSelector:       map[string]string{"kubernetes.io/hostname": targetNode},
+		RestartPolicy:      corev1.RestartPolicyNever,
+		Containers: []corev1.Container{{
+			Name:  "workload",
+			Image: "busybox:1.36",
+			Command: []string{"sh", "-c", fmt.Sprintf(
+				"wget -T 20 -O /dev/null http://%s/ 2>&1; echo %s$?; sleep 3600",
+				target, exitMarkerPrefix,
+			)},
+		}},
+	}
+	switch initContainerMode {
+	case initContainerModeProbe:
+		spec.InitContainers = []corev1.Container{{
+			Name:  "wait-for-ztunnel-identity",
+			Image: "busybox:1.36",
+			Command: []string{"sh", "-c", fmt.Sprintf(
+				`start=$(date +%%s); i=0; outcome=exhausted; `+
+					`while [ $i -lt %d ]; do i=$((i+1)); `+
+					`wget --no-check-certificate -T %s -O /dev/null "https://$KUBERNETES_SERVICE_HOST:$KUBERNETES_SERVICE_PORT/" 2>&1 | grep -q "HTTP/" `+
+					`&& { outcome=ready; break; }; sleep %s; done; `+
+					`end=$(date +%%s); echo "%s$outcome attempts=$i elapsed=$((end-start))s"; exit 0`,
+				initContainerRetries, initContainerProbeTimeout, initContainerRetryInterval, initOutcomeMarkerPrefix,
+			)},
+		}}
+	case initContainerModeNoop:
+		spec.InitContainers = []corev1.Container{{
+			Name:    "noop",
+			Image:   "busybox:1.36",
+			Command: []string{"sh", "-c", "exit 0"},
+		}}
+	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   name,
 			Labels: map[string]string{"app": "ztunnel-diag", "run": runID},
 		},
-		Spec: corev1.PodSpec{
-			ServiceAccountName: serviceAccount,
-			NodeSelector:       map[string]string{"kubernetes.io/hostname": targetNode},
-			RestartPolicy:      corev1.RestartPolicyNever,
-			Containers: []corev1.Container{{
-				Name:  "workload",
-				Image: "busybox:1.36",
-				Command: []string{"sh", "-c", fmt.Sprintf(
-					"wget -T 20 -O /dev/null http://%s/ 2>&1; echo %s$?; sleep 3600",
-					target, exitMarkerPrefix,
-				)},
-			}},
-		},
+		Spec: spec,
 	}
 }
 
@@ -247,6 +338,46 @@ func connectionFailed(workloadLog string) (failed, known bool) {
 		return false, false
 	}
 	return code != 0, true
+}
+
+// initContainerOutcome reads back the init container's own outcome marker
+// (see podSpec): "ready" if its probe loop succeeded before exhausting its
+// retry budget, false with known=false if the marker never showed up (the
+// mitigation wasn't enabled, or the init container's log wasn't available).
+func initContainerOutcome(initLog string) (ready, known bool, attempts int, elapsed time.Duration) {
+	idx := strings.Index(initLog, initOutcomeMarkerPrefix)
+	if idx == -1 {
+		return false, false, 0, 0
+	}
+	rest := initLog[idx+len(initOutcomeMarkerPrefix):]
+	if nl := strings.IndexByte(rest, '\n'); nl != -1 {
+		rest = rest[:nl]
+	}
+	fields := strings.Fields(rest)
+	if len(fields) != 3 {
+		return false, false, 0, 0
+	}
+	outcome := fields[0]
+	if outcome != "ready" && outcome != "exhausted" {
+		return false, false, 0, 0
+	}
+	attemptsStr, ok := strings.CutPrefix(fields[1], "attempts=")
+	if !ok {
+		return false, false, 0, 0
+	}
+	attempts, err := strconv.Atoi(attemptsStr)
+	if err != nil {
+		return false, false, 0, 0
+	}
+	elapsedStr, ok := strings.CutPrefix(fields[2], "elapsed=")
+	if !ok {
+		return false, false, 0, 0
+	}
+	elapsedSecs, err := strconv.Atoi(strings.TrimSuffix(elapsedStr, "s"))
+	if err != nil {
+		return false, false, 0, 0
+	}
+	return outcome == "ready", true, attempts, time.Duration(elapsedSecs) * time.Second
 }
 
 func startPodIPWatch(ctx context.Context, cs *kubernetes.Clientset, ns, runID string) (watch.Interface, error) {
@@ -300,9 +431,13 @@ func collectPodIPs(ctx context.Context, w watch.Interface, podNames []string, wi
 // here is the client-observed pod-creation time, not a node-local sandbox
 // timestamp — see README.md "What this measures" for why that's the honest
 // proxy available without shelling into the node.
-func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS, ztunnelLabel string, podNames []string, createdAt, patchTimes map[string]time.Time) []report.PodEvent {
+func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS, ztunnelLabel, targetHost string, podNames []string, createdAt, patchTimes map[string]time.Time, initContainerMode string) []report.PodEvent {
 	ztunnelLogs := fetchZtunnelLogs(ctx, cs, ztunnelNS, ztunnelLabel)
-	workloadLogs := fetchWorkloadLogs(ctx, cs, ns, podNames)
+	workloadLogs := fetchContainerLogs(ctx, cs, ns, "workload", podNames)
+	var initLogs map[string]string
+	if initContainerMode == initContainerModeProbe {
+		initLogs = fetchContainerLogs(ctx, cs, ns, "wait-for-ztunnel-identity", podNames)
+	}
 
 	events := make([]report.PodEvent, 0, len(podNames))
 	for _, name := range podNames {
@@ -323,17 +458,22 @@ func buildPodEvents(ctx context.Context, cs *kubernetes.Clientset, ns, ztunnelNS
 				break
 			}
 		}
-		routingDelay, routingDelayKnown := ztlog.RoutingDelay(ztunnelLogs, name, ns)
+		routingDelay, routingDelayKnown := ztlog.RoutingDelay(ztunnelLogs, name, ns, targetHost)
 		connFailed, connFailedKnown := connectionFailed(workloadLogs[name])
+		initReady, initKnown, initAttempts, initElapsed := initContainerOutcome(initLogs[name])
 		events = append(events, report.PodEvent{
-			Name:                  name,
-			IPAssignedAt:          created,
-			IPPatchedAtAPI:        patchedAt,
-			ZtunnelTimeout:        timedOut,
-			RoutingDelay:          routingDelay,
-			RoutingDelayKnown:     routingDelayKnown,
-			ConnectionFailed:      connFailed,
-			ConnectionFailedKnown: connFailedKnown,
+			Name:                      name,
+			IPAssignedAt:              created,
+			IPPatchedAtAPI:            patchedAt,
+			ZtunnelTimeout:            timedOut,
+			RoutingDelay:              routingDelay,
+			RoutingDelayKnown:         routingDelayKnown,
+			ConnectionFailed:          connFailed,
+			ConnectionFailedKnown:     connFailedKnown,
+			InitContainerOutcomeKnown: initKnown,
+			InitContainerReady:        initReady,
+			InitContainerAttempts:     initAttempts,
+			InitContainerElapsed:      initElapsed,
 		})
 	}
 	return events
@@ -357,7 +497,13 @@ func fetchZtunnelLogs(ctx context.Context, cs *kubernetes.Clientset, ns, label s
 	return lines
 }
 
-func fetchWorkloadLogs(ctx context.Context, cs *kubernetes.Clientset, ns string, podNames []string) map[string]string {
+// fetchContainerLogs reads back one named container's log from each of
+// podNames, concurrently — up to len(podNames) API calls, so this is not
+// worth doing sequentially. container must be given explicitly: the API
+// requires it once a pod has more than one container (workload plus,
+// optionally, the mitigation init container), so this can't rely on a
+// pod-wide default.
+func fetchContainerLogs(ctx context.Context, cs *kubernetes.Clientset, ns, container string, podNames []string) map[string]string {
 	logs := make(map[string]string, len(podNames))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -365,9 +511,9 @@ func fetchWorkloadLogs(ctx context.Context, cs *kubernetes.Clientset, ns string,
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			body, err := readPodLog(ctx, cs, ns, name, &corev1.PodLogOptions{})
+			body, err := readPodLog(ctx, cs, ns, name, &corev1.PodLogOptions{Container: container})
 			if err != nil {
-				log.Printf("stream logs for %s: %v", name, err)
+				log.Printf("stream logs for %s/%s: %v", name, container, err)
 				return
 			}
 			mu.Lock()
@@ -454,6 +600,11 @@ func printSummary(rep report.Report) {
 		fmt.Printf("  ztunnel timeout matches connection failure: %d/%d pods (failed+timeout=%d, failed+no-timeout=%d, ok+timeout=%d, ok+no-timeout=%d)\n",
 			matches, rep.TimeoutVsFailureComparableCount, rep.FailedAndTimedOut, rep.FailedNotTimedOut, rep.OKButTimedOut, rep.OKNotTimedOut)
 	}
+	if rep.InitContainerKnownCount > 0 {
+		fmt.Printf("  init container outcome: %d/%d ready, %d/%d exhausted their retry budget (mean %s, max %s to ready/exhausted)\n",
+			rep.InitContainerReadyCount, rep.InitContainerKnownCount, rep.InitContainerExhaustedCount, rep.InitContainerKnownCount,
+			rep.MeanInitContainerElapsed, rep.MaxInitContainerElapsed)
+	}
 	fmt.Println()
 	for _, p := range rep.Pods {
 		flag := ""
@@ -471,6 +622,14 @@ func printSummary(rep report.Report) {
 				conn = "connection: FAILED"
 			}
 		}
-		fmt.Printf("  %-40s patch=%-10s %-24s %s%s\n", p.Name, p.PatchLatency, routing, conn, flag)
+		initStatus := ""
+		if p.InitContainerOutcomeKnown {
+			outcome := "ready"
+			if !p.InitContainerReady {
+				outcome = "EXHAUSTED"
+			}
+			initStatus = fmt.Sprintf(" init=%s(%d,%s)", outcome, p.InitContainerAttempts, p.InitContainerElapsed)
+		}
+		fmt.Printf("  %-40s patch=%-10s %-24s %s%s%s\n", p.Name, p.PatchLatency, routing, conn, initStatus, flag)
 	}
 }

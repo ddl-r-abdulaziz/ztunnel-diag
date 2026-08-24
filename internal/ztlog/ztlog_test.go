@@ -59,8 +59,10 @@ func TestMatchesTimeoutForPod(t *testing.T) {
 	}
 }
 
+const realDebugTraceTarget = "kubernetes.default.svc.cluster.local"
+
 func TestRoutingDelay(t *testing.T) {
-	got, ok := RoutingDelay(realDebugTrace, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag")
+	got, ok := RoutingDelay(realDebugTrace, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag", realDebugTraceTarget)
 	if !ok {
 		t.Fatal("RoutingDelay: ok = false, want true")
 	}
@@ -76,7 +78,7 @@ func TestRoutingDelayIgnoresConnectionCompleteDuration(t *testing.T) {
 	// whole connection lifetime (however long the client held the socket
 	// open), not ztunnel's internal wait — RoutingDelay must not confuse the
 	// two.
-	got, ok := RoutingDelay(realDebugTrace, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag")
+	got, ok := RoutingDelay(realDebugTrace, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag", realDebugTraceTarget)
 	if !ok {
 		t.Fatal("RoutingDelay: ok = false, want true")
 	}
@@ -86,14 +88,36 @@ func TestRoutingDelayIgnoresConnectionCompleteDuration(t *testing.T) {
 }
 
 func TestRoutingDelayNoMatchReturnsFalse(t *testing.T) {
-	if _, ok := RoutingDelay(realDebugTrace, "some-other-pod", "ztunnel-diag"); ok {
+	if _, ok := RoutingDelay(realDebugTrace, "some-other-pod", "ztunnel-diag", realDebugTraceTarget); ok {
 		t.Error("RoutingDelay: ok = true for a pod not present in the logs, want false")
 	}
 }
 
 func TestRoutingDelayRequiresBothMarkers(t *testing.T) {
 	waitOnly := realDebugTrace[:3] // includes "wait for workload" but not "connection opened"
-	if _, ok := RoutingDelay(waitOnly, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag"); ok {
+	if _, ok := RoutingDelay(waitOnly, "ztunnel-diag-1787178776283731000-0", "ztunnel-diag", realDebugTraceTarget); ok {
 		t.Error("RoutingDelay: ok = true with no \"connection opened\" line, want false")
+	}
+}
+
+func TestRoutingDelaySkipsConnectionsToOtherDestinations(t *testing.T) {
+	// A mitigation init container's own probe connection (see cmd/ztunnel-diag)
+	// shares the workload's pod name/identity from ztunnel's point of view —
+	// the only thing that tells the two connections apart in the log is
+	// dst.service. RoutingDelay must measure the real target's connection,
+	// not whichever "connection opened" line happens to come first.
+	pod, ns := "ztunnel-diag-run1-0", "ztunnel-diag"
+	trace := []string{
+		`2026-08-19T21:00:00.000000Z	debug	state:lookup{}	wait for workload	wl=` + pod + `.` + ns,
+		`2026-08-19T21:00:01.000000Z	debug	access	connection opened	src.workload="` + pod + `" dst.service="kubernetes.default.svc.cluster.local"`,
+		`2026-08-19T21:00:06.000000Z	debug	access	connection opened	src.workload="` + pod + `" dst.service="echo-target.ztunnel-diag.svc.cluster.local"`,
+	}
+
+	got, ok := RoutingDelay(trace, pod, ns, "echo-target.ztunnel-diag.svc.cluster.local")
+	if !ok {
+		t.Fatal("RoutingDelay: ok = false, want true")
+	}
+	if want := 6 * time.Second; got != want {
+		t.Errorf("RoutingDelay = %v, want %v (picked up the probe's earlier connection instead of the real target's)", got, want)
 	}
 }

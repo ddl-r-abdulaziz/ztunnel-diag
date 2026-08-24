@@ -67,6 +67,11 @@ make run
 runs `make cluster` and `make echo-target` (both safe to re-run — they reuse
 the existing cluster/deployment if already up) before invoking the test.
 
+Subsequent runs with the same cluster can use:
+```
+go run ./cmd/ztunnel-diag
+```
+
 Defaults are the test as described above: 100 pods, pinned to
 `--target-node ztunnel-diag-m02`, each hitting `--target
 echo-target.ztunnel-diag.svc.cluster.local:8080`.
@@ -83,7 +88,62 @@ Flags exist for tweaking but are not needed to repro:
 | `--json` | false | print the raw report as JSON |
 | `--keep` | false | leave the burst pods running afterward instead of deleting them |
 | `--host-load-workers` | `runtime.NumCPU()` | goroutines busy-looping on the host's real CPU during the burst+window+settle, to compete with minikube's Docker containers for actual scheduling time (0 disables) |
+| `--init-container-mode` | `none` | `none` \| `noop` \| `probe` — see "Mitigation" below |
 
+
+## Mitigation: `--init-container-mode probe`
+
+An init container that retries a real HTTPS request to the k8s API server
+(`$KUBERNETES_SERVICE_HOST`/`_PORT` — no DNS, no test-specific service, just
+what constraint permits: the API server, control plane, node) until it gets
+a genuine HTTP response line back, before the workload container starts. A
+bare TCP-connect check doesn't work: ztunnel accepts a held connection's
+handshake locally before it knows whether to forward or drop it, so `nc -z`
+reports success instantly regardless of whether identity has landed. A raw
+byte round trip doesn't work either — the API server's Go TLS stack silently
+closes on malformed input instead of replying. Only an actual HTTP response
+(`wget`'s `server returned error: HTTP/1.1 403 Forbidden` on an unauthorized
+request) is unambiguous proof ztunnel genuinely forwarded the connection.
+
+Modes (`--init-container-mode`): `none` (default), `noop` (bare `exit 0`, a
+control for container-count overhead alone), `probe` (the mitigation above).
+
+**A first pass at comparing these got the methodology wrong**: `none`, then
+`noop`, then `probe` were each run once, hours apart. The repro's own
+severity turned out to drift substantially over that time (`none` alone later
+measured 97/100, then 26/100, then ~50/100 on unchanged code) — so that first
+table (97/68/0) was three samples from a moving baseline, not a controlled
+comparison. A user run of `noop` afterward showed 0/100, flatly contradicting
+the 68/100 figure, which is what surfaced the problem.
+
+The fix: interleave modes and run them back-to-back instead of in blocks, so
+drift can't masquerade as a mode effect. Three cycles of `none → noop →
+probe`, 100 pods each, run consecutively (2026-08-24, ~10:31–10:44):
+
+| cycle | none   | noop  | probe |
+|-------|--------|-------|-------|
+| 1     | 50/100 | 0/100 | 0/100 |
+| 2     | 56/100 | 0/100 | 0/100 |
+| 3     | 49/100 | 0/100 | 0/100 |
+
+Two things this settles, and one it doesn't:
+
+- `none`'s baseline was stable within this tighter window (49-56/100) —
+  today's ambient severity is real and much milder than the 97/100 seen
+  earlier in the same day, confirming the repro's severity itself varies with
+  host conditions, not just with mode.
+- Both `noop` and `probe` reliably eliminated failures here (3/3 each,
+  0/100) — under *this* baseline severity, a bare extra container is enough.
+- **What this doesn't settle**: whether `noop` holds up under the more severe
+  ~97/100 baseline seen earlier. The working hypothesis is that `noop`'s
+  benefit comes from a small, fixed, incidental delay (extra container-start
+  overhead), which is enough to cross a *marginal* race but not necessarily a
+  *severely* skewed one (routing delays up to ~22s were observed at 97/100
+  severity, vs. ~5s max at today's ~50/100 severity) — `probe`'s wait is
+  adaptive and bounded by its own retry budget regardless of severity, so it
+  shouldn't have this ceiling. This hasn't been verified by re-running the
+  interleaved comparison under high-severity conditions; treat `probe` as the
+  only one with a severity-independent guarantee until it is.
 
 ## What we explored and ruled out
 
@@ -99,9 +159,14 @@ worth keeping even though the code isn't:
   start, giving kubelet's slow status-patch path more time to win the race —
   not by making any special network call. Whether a genuinely no-op
   initContainer (present, but no sleep) helps at all, purely from kubelet's
-  own container-lifecycle overhead (image pull, CRI create/start, PLEG
-  relist), was inconclusive at the pod counts tested — plausible but not
-  confirmed either way.
+  own container-lifecycle overhead, was inconclusive at the pod counts tested
+  in earlier iterations. Revisited with `--init-container-mode noop`: an
+  interleaved comparison (see "Mitigation" above) eliminated failures
+  entirely (0/100 x3) at a ~50/100 baseline severity, tying the deterministic
+  `probe` mitigation — but that's under moderate severity only; it's unverified
+  whether `noop` holds up at the ~97/100 severity seen elsewhere in this repo.
+  `probe` doesn't share that open question, since its wait is adaptive rather
+  than a fixed incidental delay.
 - **`PILOT_PUSH_THROTTLE`.** Raising istiod's xDS push concurrency is a
   compounding factor, not the root cause — it can only help once istiod
   already knows about a burst of new identities and is limited in how fast

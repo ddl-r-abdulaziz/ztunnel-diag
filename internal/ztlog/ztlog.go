@@ -30,15 +30,22 @@ func MatchesTimeoutForPod(line, pod string) bool {
 	return strings.Contains(line, "'"+pod+".") || strings.Contains(line, "("+pod+")")
 }
 
-// RoutingDelay returns how long ztunnel took, for the given pod, between
-// first needing that workload's identity and actually routing its
-// connection — the real time-to-route.
+// RoutingDelay returns how long it took, for the given pod, from first
+// needing that workload's identity to its connection to targetService
+// actually opening.
+//
+// targetService scopes the end marker to that specific destination
+// (ztunnel's dst.service field) rather than any "connection opened" line for
+// this pod — a mitigation init container's own probe connection shares the
+// workload's identity from ztunnel's point of view, so dst.service is the
+// only thing that tells the two apart in the log.
 //
 // It requires RUST_LOG=debug on ztunnel (the default "info" level doesn't
 // emit these lines).
-func RoutingDelay(logs []string, pod, namespace string) (time.Duration, bool) {
+func RoutingDelay(logs []string, pod, namespace, targetService string) (time.Duration, bool) {
 	waitMarker := "wl=" + pod + "." + namespace
 	openMarker := `src.workload="` + pod + `"`
+	targetMarker := `dst.service="` + targetService + `"`
 
 	var start, end time.Time
 	for _, line := range logs {
@@ -48,7 +55,8 @@ func RoutingDelay(logs []string, pod, namespace string) (time.Duration, bool) {
 			}
 			continue
 		}
-		if !start.IsZero() && strings.Contains(line, "connection opened") && strings.Contains(line, openMarker) {
+		if !start.IsZero() && end.IsZero() && strings.Contains(line, "connection opened") &&
+			strings.Contains(line, openMarker) && strings.Contains(line, targetMarker) {
 			if ts, ok := parseTimestamp(line); ok {
 				end = ts
 			}
